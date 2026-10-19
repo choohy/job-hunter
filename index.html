@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Visa-Ready Job Hunt</title>
+<meta name="description" content="Free checklist and paid research toolkit for graduates looking for employers who sponsor visas. By Hwan-Yi Choo.">
+<style>
+/* Payment settings: paste your checkout link between the quotes in the script at the bottom of this file (CHECKOUT_URL). */
+:root{--p:#1F4E5F;--a:#D98A3A;--bg:#F7F3EC;--card:#fff;--ink:#1C1A17;--muted:#1C1A17B3;--soft:#1F4E5F14;--line:#1C1A1722;--on-p:#fff}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--p:#8CC3D6;--a:#E3A060;--bg:#15191b;--card:#1f2528;--ink:#ECE8E1;--muted:#ECE8E1B3;--soft:#8CC3D61A;--line:#ECE8E133;--on-p:#10181b}}
+:root[data-theme="dark"]{--p:#8CC3D6;--a:#E3A060;--bg:#15191b;--card:#1f2528;--ink:#ECE8E1;--muted:#ECE8E1B3;--soft:#8CC3D61A;--line:#ECE8E133;--on-p:#10181b}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:"Aptos","Segoe UI",-apple-system,BlinkMacSystemFont,"Helvetica Neue",Arial,sans-serif;font-size:17px;line-height:1.6;-webkit-font-smoothing:antialiased}
+a{color:var(--p)}
+h1,h2,h3{font-family:Georgia,"Times New Roman",serif;color:var(--p);line-height:1.15;letter-spacing:-.01em}
+h1{font-size:clamp(34px,5.2vw,54px);margin:0 0 18px}
+h2{font-size:clamp(27px,3.6vw,36px);margin:0 0 14px}
+h3{font-size:21px;margin:0 0 8px}
+p{margin:0 0 14px}
+.wrap{max-width:1080px;margin:0 auto;padding:0 16px}
+.kicker{font-size:12.5px;letter-spacing:.14em;text-transform:uppercase;font-weight:700;color:var(--a);margin:0 0 12px}
+.btn{display:inline-block;border-radius:999px;padding:13px 24px;font-weight:700;font-size:16px;text-decoration:none;border:2px solid var(--p);cursor:pointer;font-family:inherit;line-height:1.3;text-align:center}
+.btn.solid{background:var(--p);color:var(--on-p)}
+.btn.line{background:transparent;color:var(--p)}
+.btn.warm{background:var(--a);border-color:var(--a);color:#1C1A17}
+.btn:focus-visible{outline:3px solid var(--a);outline-offset:3px}
+.btn[aria-disabled="true"]{opacity:.55;cursor:not-allowed}
+
+nav{display:flex;justify-content:space-between;align-items:center;padding:18px 0;gap:12px}
+nav .brand{font-family:Georgia,serif;font-weight:700;color:var(--p);text-decoration:none;font-size:18px}
+nav .links{display:flex;gap:18px;font-size:15px;font-weight:600}
+nav .links a{text-decoration:none}
+
+.hero{display:grid;grid-template-columns:1.15fr .85fr;gap:48px;align-items:center;padding:28px 0 64px}
+.hero .sub{font-size:20px;color:var(--muted);max-width:34em}
+.hero .ctas{display:flex;flex-wrap:wrap;gap:12px;margin-top:26px}
+.hero .art{border-radius:18px;overflow:hidden;box-shadow:0 18px 40px rgba(0,0,0,.14);aspect-ratio:4/5;background:var(--soft)}
+.hero .art img{width:100%;height:100%;object-fit:cover;object-position:center 55%;display:block}
+
+section.band{padding:64px 0;border-top:1px solid var(--line)}
+.pain{display:grid;grid-template-columns:repeat(3,1fr);gap:20px;margin-top:26px}
+.pain div{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px 22px}
+.pain b{display:block;color:var(--p);margin-bottom:4px}
+
+.offers{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-top:30px;align-items:stretch}
+.offer{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:30px 28px;display:flex;flex-direction:column}
+.offer.paid{border:2px solid var(--a);box-shadow:0 14px 36px rgba(217,138,58,.16)}
+.offer .tag{align-self:flex-start;font-size:12px;letter-spacing:.12em;text-transform:uppercase;font-weight:700;padding:5px 12px;border-radius:999px;background:var(--soft);color:var(--p);margin-bottom:14px}
+.offer.paid .tag{background:var(--a);color:#1C1A17}
+.offer .price{font-family:Georgia,serif;font-size:40px;color:var(--ink);margin:4px 0 4px;line-height:1}
+.offer .price small{font-family:inherit;font-size:15px;color:var(--muted);font-weight:400}
+.offer ul{list-style:none;padding:0;margin:16px 0 24px;flex:1}
+.offer li{padding:8px 0 8px 30px;position:relative;border-bottom:1px solid var(--line)}
+.offer li:last-child{border-bottom:0}
+.offer li::before{content:"";position:absolute;left:4px;top:15px;width:12px;height:7px;border:solid var(--a);border-width:0 0 2.5px 2.5px;transform:rotate(-45deg)}
+.offer .btn{width:100%}
+.offer .fine{font-size:14px;color:var(--muted);margin:12px 0 0;text-align:center}
+
+.steps{counter-reset:s;display:grid;grid-template-columns:repeat(4,1fr);gap:18px;margin:30px 0 0;padding:0;list-style:none}
+.steps li{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:22px 20px;position:relative}
+.steps li::before{counter-increment:s;content:counter(s);display:flex;align-items:center;justify-content:center;width:36px;height:36px;border-radius:50%;background:var(--p);color:var(--on-p);font-weight:700;margin-bottom:12px}
+.steps b{display:block;color:var(--p);margin-bottom:4px}
+.steps p{font-size:15.5px;margin:0}
+.already{margin-top:22px;background:var(--soft);border-left:4px solid var(--a);border-radius:0 12px 12px 0;padding:14px 18px;font-size:16px}
+
+.faq details{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 20px;margin:0 0 12px}
+.faq summary{cursor:pointer;font-weight:700;color:var(--p)}
+.faq details p{margin:10px 0 0}
+
+.about{display:flex;gap:26px;align-items:center;background:var(--card);border:1px solid var(--line);border-radius:18px;padding:28px}
+.about img{flex:0 0 120px;width:120px;height:120px;border-radius:50%;object-fit:cover}
+footer{padding:36px 0 48px;font-size:14px;color:var(--muted);border-top:1px solid var(--line)}
+
+@media (max-width:860px){
+  .hero{grid-template-columns:1fr;gap:28px;padding-bottom:48px}
+  .hero .art{aspect-ratio:16/10;order:-1}
+  .pain,.offers{grid-template-columns:1fr}
+  .steps{grid-template-columns:1fr 1fr}
+  nav .links{display:none}
+  section.band{padding:48px 0}
+}
+@media (max-width:520px){
+  .steps{grid-template-columns:1fr}
+  .about{flex-direction:column;text-align:center}
+  .hero .ctas .btn{width:100%}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav>
+    <a class="brand" href="#top">Visa-Ready Job Hunt</a>
+    <div class="links"><a href="#free">Free checklist</a><a href="#toolkit">Toolkit</a><a href="#get-toolkit">How to get it</a><a href="#faq">FAQ</a></div>
+  </nav>
+
+  <header class="hero" id="top">
+    <div>
+      <p class="kicker">For graduates who need visa sponsorship</p>
+      <h1>Stop applying to companies that will never sponsor you</h1>
+      <p class="sub">Find the industries, companies and hiring managers that actually sponsor graduate visas, then reach out with a plan instead of guessing.</p>
+      <div class="ctas">
+        <a class="btn solid" href="The-Visa-Ready-Job-Hunt-Checklist.html">Get the free checklist</a>
+        <a class="btn line" href="#toolkit">See the full toolkit</a>
+      </div>
+    </div>
+    <div class="art"><img src="assets/cover.jpg" alt="A tidy desk with a laptop showing job listings, a notebook checklist and a cup of tea"></div>
+  </header>
+</div>
+
+<section class="band">
+  <div class="wrap">
+    <p class="kicker">Sound familiar?</p>
+    <h2>The job hunt is hard enough without the visa question</h2>
+    <div class="pain">
+      <div><b>Perfect role, instant rejection</b>You apply to roles that fit, then hear the company does not sponsor.</div>
+      <div><b>Weeks lost to guessing</b>Without a way to screen companies first, every application is a coin toss.</div>
+      <div><b>No reply from hiring managers</b>Generic messages get ignored, and you lose track of who you contacted.</div>
+    </div>
+  </div>
+</section>
+
+<section class="band" id="offers">
+  <div class="wrap">
+    <p class="kicker">Two ways to start</p>
+    <h2>Start free. Go deeper when you are ready.</h2>
+    <div class="offers">
+      <article class="offer" id="free">
+        <span class="tag">Free</span>
+        <h3>The Visa-Ready Job Hunt Checklist</h3>
+        <p class="price">$0</p>
+        <p>Know which roles and companies will actually sponsor you, before you spend weeks applying.</p>
+        <ul>
+          <li>Self-assessment: are you a realistic match for sponsorship roles</li>
+          <li>Company type and sector finder</li>
+          <li>LinkedIn profile audit: five quick fixes so recruiters find you</li>
+          <li>First outreach message that builds itself as you fill in the blanks</li>
+          <li>Interactive: tick boxes, type answers, save as PDF</li>
+        </ul>
+        <a class="btn line" href="The-Visa-Ready-Job-Hunt-Checklist.html">Open the free checklist</a>
+        <p class="fine">No sign-up. Opens in your browser.</p>
+      </article>
+
+      <article class="offer paid" id="toolkit">
+        <span class="tag">Full toolkit</span>
+        <h3>Visa-Sponsor Company Research Toolkit</h3>
+        <p class="price">$67 <small>one-time payment</small></p>
+        <p>Turns a confusing, overwhelming search into a repeatable system, so you stop applying randomly and target companies with real visa-sponsor track records.</p>
+        <ul>
+          <li>Companies-by-Sector Guide</li>
+          <li>Research template to screen a company for visa sponsorship appetite</li>
+          <li>LinkedIn search filters and Boolean search strings</li>
+          <li>Outreach tracker so you never lose track of target companies</li>
+          <li>Five ready-to-send outreach email templates</li>
+          <li>Monthly check-in guide to keep outreach moving without burning out</li>
+        </ul>
+        <a class="btn warm" id="buy-btn" href="#get-toolkit">Get the toolkit for $67</a>
+        <p class="fine" id="buy-note">Secure checkout. Your access details arrive by email.</p>
+      </article>
+    </div>
+  </div>
+</section>
+
+<section class="band" id="get-toolkit">
+  <div class="wrap">
+    <p class="kicker">How to get the toolkit</p>
+    <h2>From payment to unlocked in about two minutes</h2>
+    <ol class="steps">
+      <li><b>Pay securely</b><p>Click <em>Get the toolkit</em> and complete checkout. Card details are handled by the payment provider, never by this site.</p></li>
+      <li><b>Check your email</b><p>Your receipt includes the toolkit link and your unlock password. Check spam if it is not there in a few minutes.</p></li>
+      <li><b>Unlock it</b><p>Open the toolkit link, type the password and press <em>Unlock</em>. It opens right in your browser.</p></li>
+      <li><b>Keep a copy</b><p>Use <em>Save as PDF</em> or <em>Download file</em> inside the toolkit so you have it offline.</p></li>
+    </ol>
+    <p class="already"><b>Already bought it?</b> <a href="Visa-Sponsor-Company-Research-Toolkit-locked.html">Open the toolkit</a> and enter the password from your receipt email.</p>
+  </div>
+</section>
+
+<section class="band faq" id="faq">
+  <div class="wrap">
+    <h2>Questions</h2>
+    <details><summary>Should I start with the free checklist?</summary><p>Yes. The checklist tells you whether you are in the zone for sponsorship roles and which sectors to look at. The toolkit picks up from there with the research method, search strings, tracker and templates.</p></details>
+    <details><summary>Is the toolkit a physical product or a subscription?</summary><p>Neither. It is a one-time digital purchase that opens in any modern browser on a laptop or phone, and you can save it as a PDF.</p></details>
+    <details><summary>I paid but did not get an email.</summary><p>Check your spam or promotions folder first. If it is still missing, reply to your payment receipt and you will be sent the link and password directly.</p></details>
+    <details><summary>Does this guarantee a sponsored job?</summary><p>No one can promise that. The toolkit helps you spend your time on companies that already sponsor and reach the people who decide, which is where your odds are best.</p></details>
+  </div>
+</section>
+
+<section class="band">
+  <div class="wrap">
+    <div class="about">
+      <img src="assets/author.jpg" alt="Hwan-Yi Choo">
+      <div>
+        <h3>About Hwan-Yi Choo</h3>
+        <p>Hwan-Yi helps recent graduates navigate the job market to find employers who will sponsor their visa. With over two decades in tech and a track record of mentoring graduates entering the field, Hwan-Yi understands the gap between having the skills and knowing how to target the companies that will hire you.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">&copy; <span id="yr">2026</span> Hwan-Yi Choo. General guidance only, not migration or legal advice.</div>
+</footer>
+
+<script>
+(function(){
+  // Paste your checkout link here (Gumroad, Lemon Squeezy, Stripe Payment Link, etc.)
+  var CHECKOUT_URL = '';
+
+  var btn = document.getElementById('buy-btn');
+  var note = document.getElementById('buy-note');
+  if (CHECKOUT_URL) {
+    btn.href = CHECKOUT_URL;
+  } else {
+    btn.setAttribute('aria-disabled', 'true');
+    btn.textContent = 'Checkout opening soon';
+    note.textContent = 'Start with the free checklist while checkout is being set up.';
+    btn.addEventListener('click', function(e){ e.preventDefault(); });
+  }
+  document.getElementById('yr').textContent = new Date().getFullYear();
+})();
+</script>
+</body>
+</html>
