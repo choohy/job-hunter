@@ -1,0 +1,2094 @@
+<!doctype html>
+<html lang="en-AU">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Productivity Tracker</title>
+<meta name="description" content="Six-step job search productivity tracker. Data stays in your browser (localStorage). AI features are optional and use your own Anthropic API key.">
+<style>
+  :root {
+    --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --color-text-primary: #1f1e1d;
+    --color-text-secondary: #5f5e5a;
+    --color-text-tertiary: #8a8984;
+    --color-text-info: #0c447c;
+    --color-background-primary: #ffffff;
+    --color-background-secondary: #f4f3ef;
+    --color-background-info: #e6f1fb;
+    --color-border-secondary: #b9b7ae;
+    --color-border-tertiary: #d8d6ce;
+    --overlay-backdrop: rgba(20, 20, 20, 0.45);
+    --overlay-bg: #fffde7;
+    --overlay-border: #f0e68c;
+    --page-bg: #fbfaf7;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --color-text-primary: #ecebe6;
+      --color-text-secondary: #b5b3ab;
+      --color-text-tertiary: #8a8984;
+      --color-text-info: #b5d4f4;
+      --color-background-primary: #22221f;
+      --color-background-secondary: #2c2c28;
+      --color-background-info: #1b3550;
+      --color-border-secondary: #5a5952;
+      --color-border-tertiary: #3e3d38;
+      --overlay-backdrop: rgba(0, 0, 0, 0.6);
+      --overlay-bg: #2a2a24;
+      --overlay-border: #57532f;
+      --page-bg: #181816;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --color-text-primary: #ecebe6; --color-text-secondary: #b5b3ab; --color-text-tertiary: #8a8984; --color-text-info: #b5d4f4;
+    --color-background-primary: #22221f; --color-background-secondary: #2c2c28; --color-background-info: #1b3550;
+    --color-border-secondary: #5a5952; --color-border-tertiary: #3e3d38;
+    --overlay-backdrop: rgba(0,0,0,0.6); --overlay-bg: #2a2a24; --overlay-border: #57532f; --page-bg: #181816; color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--page-bg); color: var(--color-text-primary); font-family: var(--font-sans); }
+  button:disabled { opacity: 0.5; cursor: not-allowed !important; }
+  a { color: inherit; }
+  #boot { padding: 2rem 16px; font-size: 14px; color: var(--color-text-secondary); text-align: center; }
+  [contenteditable]:empty:before { content: attr(data-placeholder); color: var(--color-text-tertiary); pointer-events: none; }
+  @keyframes popIn { 0% { transform: scale(0); opacity: 0 } 60% { transform: scale(1.3) } 100% { transform: scale(1); opacity: 1 } }
+  @keyframes stepPop { 0% { transform: scale(0.5); opacity: 0 } 70% { transform: scale(1.05) } 100% { transform: scale(1); opacity: 1 } }
+</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
+</head>
+<body>
+<div id="root"><div id="boot">Loading your tracker...</div></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef } = React;
+
+/* =========================================================================
+   Helpers: dates (local time, not UTC), storage, HTML safety, AI
+   ========================================================================= */
+
+// Local YYYY-MM-DD. The original used toISOString(), which is UTC: in Melbourne
+// that gives yesterday's date until 10-11am, breaking habits, streaks and "today".
+const pad = n => String(n).padStart(2, "0");
+const dateStr = d => d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate());
+const todayStr = () => dateStr(new Date());
+const daysBetween = (a, b) => Math.round((new Date(b + "T00:00:00") - new Date(a + "T00:00:00")) / 86400000);
+
+const STATE_KEY = "pt_v1";
+const CHECKS_KEY = "pt_checks";
+const SETTINGS_KEY = "pt_settings"; // kept separate so the API key is never in exports
+const DEFAULT_MODEL = "claude-sonnet-5-5";
+
+const lsGet = (k, fallback) => { try { const v = localStorage.getItem(k); return v == null ? fallback : JSON.parse(v); } catch { return fallback; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch { return false; } };
+const lsDel = k => { try { localStorage.removeItem(k); } catch {} };
+
+const escapeHtml = s => String(s || "").replace(/[&<>"']/g, c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]));
+const textToHtml = t => escapeHtml(t).replace(/\n/g, "<br>");
+const sanitize = html => window.DOMPurify ? window.DOMPurify.sanitize(html || "") : escapeHtml(html);
+const stripHtml = html => { const d = document.createElement("div"); d.innerHTML = sanitize(html); return (d.textContent || "").trim(); };
+
+const loadSettings = () => ({ apiKey: "", model: DEFAULT_MODEL, ...lsGet(SETTINGS_KEY, {}) });
+const hasApiKey = () => !!loadSettings().apiKey;
+
+class AIError extends Error {}
+
+// Single entry point for every AI feature. Calls the Anthropic API directly from
+// the browser with the user's own key (stored only in this browser).
+async function callClaude({ system, messages, max_tokens = 1000 }) {
+  const s = loadSettings();
+  if (!s.apiKey) throw new AIError("AI is off: no API key saved. Open Settings (top right) to add your Anthropic API key. Every non-AI feature works without it.");
+  let res;
+  try {
+    res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": s.apiKey,
+        "anthropic-version": "2023-06-01",
+        "anthropic-dangerous-direct-browser-access": "true",
+      },
+      body: JSON.stringify({ model: s.model || DEFAULT_MODEL, max_tokens, system, messages }),
+    });
+  } catch { throw new AIError("Could not reach the Anthropic API. Check your internet connection."); }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new AIError("AI error " + res.status + ": " + (data.error?.message || res.statusText));
+  return (data.content || []).filter(b => b.type === "text").map(b => b.text).join("\n") || "No response.";
+}
+const aiErrorText = e => (e instanceof AIError ? e.message : "Something went wrong: " + (e?.message || e));
+
+// The API requires the first message to come from the user. Chats here start with
+// an assistant turn, so we prepend the opener that produced it.
+const toApiMessages = (opener, msgs) => [{ role: "user", content: opener }, ...msgs.map(m => ({ role: m.role, content: m.text }))];
+
+/* =========================================================================
+   Static content
+   ========================================================================= */
+
+const STEPS = [
+  { id:"reflect",   label:"1. Reflect",   emoji:"🔍", color:"#534ab7", bg:"#eeedfe", text:"#3c3489",
+    tagline:"Understand your strengths, values and experience",
+    tips:["Review your STAR/CAR achievements to identify patterns in your strengths","Reflect on past roles and what energised you vs drained you","Use What do you know about me to get an AI summary of your profile","Write your weekly reflection to clarify what you want next"],
+    checks:["Completed at least 3 STAR achievements","Written a weekly reflection about career goals","Run AI profile summary","Identified top 5 strengths"],
+    aiPrompts:[["What are my key strengths?","Based on my CV and achievements, what are my key strengths and what roles would best suit me?"],["What patterns do you see?","Looking at my achievements and experience, what patterns or themes stand out about my career?"]] },
+  { id:"plan",      label:"2. Plan",      emoji:"📋", color:"#185fa5", bg:"#e6f1fb", text:"#0c447c",
+    tagline:"Set your goals, build your routine and stay on track",
+    tips:["Set a clear weekly goal focused on your job search","Create daily habits like LinkedIn activity or skill learning","Break your job search into small daily tasks","Track your energy and mood to schedule deep work effectively"],
+    checks:["Set this weeks focus goal","Created at least 2 job search habits","Added tasks for today","Logged morning check-in"],
+    aiPrompts:[["Plan my week","Look at my habits, tasks and weekly goal. Help me plan a focused job search week."],["What should I prioritise?","Based on my current tasks and applications, what should I focus on this week?"]] },
+  { id:"network",   label:"3. Network",   emoji:"🤝", color:"#0f6e56", bg:"#e1f5ee", text:"#085041",
+    tagline:"Build relationships that open doors",
+    tips:["Aim to connect with 2-3 new people per week in your target industry","Always personalise your LinkedIn connection requests","Follow up within 48 hours of meeting someone","Use the contact log to track next steps for each connection"],
+    checks:["Added at least 5 contacts","Logged next steps for each contact","Reached out to at least 1 mentor or advocate","Explored networking resources"],
+    aiPrompts:[["Networking strategy","Based on my contacts and target roles, what networking strategy do you recommend?"],["Draft outreach message","Help me write a personalised LinkedIn outreach message for a new contact in my industry."]] },
+  { id:"apply",     label:"4. Apply",     emoji:"📨", color:"#854f0b", bg:"#faeeda", text:"#633806",
+    tagline:"Find the right roles and put your best application forward",
+    tips:["Tailor your resume and cover letter for every application","Use the AI tools to evaluate role fit before applying","Track every application in the pipeline","Follow up 5-7 days after applying if you have not heard back"],
+    checks:["Added at least 3 job applications","Used AI to evaluate at least 1 role","Generated a tailored resume for a role","Saved key job boards in Resources"],
+    aiPrompts:[["Am I applying to the right roles?","Looking at my applications and CV, am I targeting the right types of roles? Any gaps or suggestions?"],["Improve my applications","What can I do to improve my job applications based on my current pipeline?"]] },
+  { id:"interview", label:"5. Interview", emoji:"🎤", color:"#993c1d", bg:"#faece7", text:"#712b13",
+    tagline:"Prepare deeply and show up authentically",
+    tips:["Practice with the Interview Coach before every real interview","Build your STAR/CAR achievement bank for common question types","Review your LinkedIn profile to ensure it matches your applications","Use the CAR method: Context, Action, Result"],
+    checks:["Completed at least 1 interview practice session","Prepared 5 or more STAR achievements","Reviewed LinkedIn profile against target role","Reviewed salary bands for target roles"],
+    aiPrompts:[["Start interview practice","I want to practise for an upcoming interview. Start a mock session based on my target roles and CV."],["What should I prepare?","Based on my applications and achievements, what interview questions should I prepare for?"]] },
+  { id:"thrive",    label:"6. Thrive",    emoji:"🚀", color:"#3b6d11", bg:"#eaf3de", text:"#173404",
+    tagline:"Negotiate confidently, reflect on wins and grow",
+    tips:["Research salary bands before any offer negotiation","Log your wins regularly to build confidence and evidence","Keep reflecting weekly even after landing a role","Maintain your network and stay in touch with contacts"],
+    checks:["Researched salary bands for your target role","Logged at least 3 wins this week","Written a weekly reflection","Kept networking contacts updated"],
+    aiPrompts:[["What salary should I target?","Based on my CV and target roles, what salary should I be aiming for and how should I negotiate?"],["Summarise my progress","Give me a motivating summary of my job search progress so far, including wins, momentum and what to focus on next."]] },
+];
+
+const SUB_TABS = {
+  reflect:   ["Achievements","Strengths","Missions","Weekly","AI: About Me"],
+  plan:      ["Today","Tasks","Habits","Weekly"],
+  network:   ["Networking","Resources"],
+  apply:     ["Job Apps","Resources"],
+  interview: ["Achievements","AI: Interview","AI: LinkedIn"],
+  thrive:    ["Weekly","AI: Salary","AI Coach"],
+};
+const isAiTab = t => t.startsWith("AI");
+
+const REFLECTION_QUESTIONS = [
+  { id:"enjoy",     question:"What do you enjoy most about your current or most recent role, and what improvements or changes would you like to make?" },
+  { id:"known",     question:"What are you known for? Consider what people come to you for and how you contribute to improving their work or driving better outcomes for teams you are part of." },
+  { id:"strengths", question:"What are your strengths? When finding your next role, it is essential to clearly and concisely communicate your strengths. Start by thinking about your top five strengths." },
+  { id:"special",   question:"What makes your strengths special? Think about what sets you apart - what makes you different from others you work with." },
+];
+
+const RESOURCE_SUGGESTIONS = {
+  "Job Boards": [
+    { title:"Seek", url:"https://www.seek.com.au", description:"Australia's leading job board" },
+    { title:"LinkedIn Jobs", url:"https://www.linkedin.com/jobs", description:"Professional network job listings" },
+    { title:"Indeed", url:"https://au.indeed.com", description:"Broad job search across industries" },
+    { title:"Glassdoor Jobs", url:"https://www.glassdoor.com.au/Job", description:"Jobs with company reviews and salaries" },
+    { title:"Ethical Jobs", url:"https://www.ethicaljobs.com.au", description:"Not-for-profit and social sector roles" },
+    { title:"Jora", url:"https://au.jora.com", description:"Job aggregator across multiple sources" },
+  ],
+  "Learning & Courses": [
+    { title:"Coursera", url:"https://www.coursera.org", description:"Online courses from top universities" },
+    { title:"Udemy", url:"https://www.udemy.com", description:"Affordable courses across all topics" },
+    { title:"LinkedIn Learning", url:"https://www.linkedin.com/learning", description:"Professional skills and career courses" },
+    { title:"YouTube", url:"https://www.youtube.com", description:"Free tutorials and educational content" },
+    { title:"edX", url:"https://www.edx.org", description:"University-level online courses" },
+    { title:"Skillshare", url:"https://www.skillshare.com", description:"Creative and professional skills" },
+  ],
+  "Career Tools": [
+    { title:"Resume.io", url:"https://resume.io", description:"Easy resume builder with templates" },
+    { title:"Canva Resume", url:"https://www.canva.com/resumes", description:"Visual resume templates" },
+    { title:"Novoresume", url:"https://novoresume.com", description:"ATS-friendly resume builder" },
+    { title:"Interview Warmup", url:"https://grow.google/certificates/interview-warmup", description:"Google AI-powered interview practice" },
+    { title:"Big Interview", url:"https://biginterview.com", description:"Interview training and practice" },
+    { title:"Hemingway Editor", url:"https://hemingwayapp.com", description:"Improve clarity of your writing" },
+  ],
+  "Networking": [
+    { title:"LinkedIn", url:"https://www.linkedin.com", description:"Professional networking platform" },
+    { title:"Meetup", url:"https://www.meetup.com", description:"Local professional and interest groups" },
+    { title:"Eventbrite", url:"https://www.eventbrite.com.au", description:"Industry events and conferences" },
+    { title:"Twitter / X", url:"https://twitter.com", description:"Industry conversations and thought leaders" },
+  ],
+  "Company Research": [
+    { title:"Glassdoor", url:"https://www.glassdoor.com.au", description:"Company reviews, salaries and culture" },
+    { title:"Crunchbase", url:"https://www.crunchbase.com", description:"Startup and company funding data" },
+    { title:"LinkedIn Companies", url:"https://www.linkedin.com/search/results/companies", description:"Research companies and employees" },
+    { title:"ASIC Companies", url:"https://connectonline.asic.gov.au", description:"Australian company registration info" },
+    { title:"Comparably", url:"https://www.comparably.com", description:"Company culture and compensation data" },
+  ],
+  "Salary & Market Data": [
+    { title:"Seek Salary Insights", url:"https://www.seek.com.au/career-advice/salary", description:"Australian salary benchmarks by role" },
+    { title:"PayScale", url:"https://www.payscale.com", description:"Salary data and compensation research" },
+    { title:"Glassdoor Salaries", url:"https://www.glassdoor.com.au/Salaries", description:"Company-specific salary insights" },
+    { title:"ABS Labour Statistics", url:"https://www.abs.gov.au/statistics/labour", description:"Official Australian labour market data" },
+    { title:"Levels.fyi", url:"https://www.levels.fyi", description:"Tech industry compensation data" },
+  ],
+  "Personal Bookmarks": [],
+};
+
+const SUGGESTION_COLORS = {
+  "Job Boards":          { bg:"#e6f1fb", text:"#185fa5", border:"#b5d4f4" },
+  "Learning & Courses":  { bg:"#eeedfe", text:"#3c3489", border:"#afa9ec" },
+  "Career Tools":        { bg:"#faece7", text:"#993c1d", border:"#f0997b" },
+  "Networking":          { bg:"#e1f5ee", text:"#0f6e56", border:"#9fe1cb" },
+  "Company Research":    { bg:"#faeeda", text:"#854f0b", border:"#fac775" },
+  "Salary & Market Data":{ bg:"#eaf3de", text:"#3b6d11", border:"#c0dd97" },
+  "Personal Bookmarks":  { bg:"#f1efe8", text:"#5f5e5a", border:"#d3d1c7" },
+};
+
+const CATEGORIES = ["Focus","Job Search","Networking","Skill Dev","Wins","Reflection"];
+const PRIORITIES = ["High","Medium","Low"];
+const PIPELINE_STAGES = ["Job Found","Applied","Phone Screen","Assessment","Interview","Final Round","Offer","Rejected","Not a Good Fit"];
+const CONTACT_CATEGORIES = ["Sponsor","Advocate","Mentor","Mentee","Recruiter","Hiring Manager","Referral","Industry Contact","Not Useful"];
+const LI_SECTIONS = ["Headline","Summary / About","Experience","Skills","Education","Certifications"];
+const MISSION_STATUSES = ["Not started","In progress","Done"];
+const MISSION_STATUS_COLORS = { "Not started":"#888780", "In progress":"#185fa5", "Done":"#1d9e75" };
+const MISSION_STATUS_BG = { "Not started":"#f1efe8", "In progress":"#e6f1fb", "Done":"#e1f5ee" };
+const QUESTION_TYPES = [
+  { id:"behavioural", label:"Behavioural (CAR/STAR)", color:"#185fa5" },
+  { id:"situational", label:"Situational / hypothetical", color:"#0f6e56" },
+  { id:"competency",  label:"Competency-based", color:"#534ab7" },
+  { id:"curveball",   label:"Curveball / stress", color:"#993556" },
+  { id:"technical",   label:"Role-specific technical", color:"#854f0b" },
+  { id:"salary",      label:"Salary negotiation", color:"#639922" },
+];
+
+const INTERVIEW_GUIDE = `You are trained on the JobAccelerator 22 Ways to Master Interviews framework. Key principles:
+PREPARATION: Research company USP, goals, customer base. Interviewers assess: skills, mindset/motivation, cultural fit.
+FIRST IMPRESSIONS: People form impressions in 1/10th of a second. Non-verbal cues matter. Use mirroring. Use interviewer name.
+AUTHENTICITY: Be the real professional you. Show judgment, mindset and values. Be honest about what you know and are learning. Own your decisions.
+SELL YOUR STORY: Show value through measurable achievements. Structure: hired to solve X, achieved Y by doing A/B/C.
+CAR METHOD: Context, Action, Result. Avoid: saying we instead of I, theoretical would do instead of past actions, generalisations, personal opinions.
+TRICKY QUESTIONS: CV gaps (explain honestly), overqualified (transferable skills), left last job (stay positive), weaknesses (honest but not role-critical), salary (research market rate).
+NEVER DO: Swear, leave phone on, complain about managers, overshare personal life, over-familiarity.
+CLOSING: Always ask 3 questions - top challenges, success at 6 months, next steps. Close by mentioning uncovered skills, thanking interviewer, emphasising genuine interest.
+RECOVERING: Do not panic. Acknowledge fumble, ask to re-answer. If blank, move on and email later.`;
+
+const emptyFeedbackRow = () => ({ name:"", think:"", people:"", communicate:"", other:"" });
+const defaultState = {
+  tasks:[], contacts:[], applications:[], habits:[],
+  weeklyGoal:"", weeklyTargetApps:5, wins:[], reflections:[],
+  checkIn:null, cv:"", linkedInSections:{}, achievements:[], resources:[],
+  missions:[],
+  strengths:{ via:[], clifton:[], cv:[], other:[] }, reflectionAnswers:{},
+  feedbackTable:{ rows: Array.from({ length:5 }, emptyFeedbackRow) },
+  myThoughts:{ patterns:"", surprised:"", actions:"" },
+  myName:"",
+};
+const loadState = () => ({ ...defaultState, ...lsGet(STATE_KEY, {}) });
+
+const uid = () => Math.random().toString(36).slice(2, 9);
+const priorityColor = { High:"#e24b4a", Medium:"#ba7517", Low:"#1d9e75" };
+const categoryColor = { "Focus":"#534ab7","Job Search":"#185fa5","Networking":"#0f6e56","Skill Dev":"#993556","Wins":"#639922","Reflection":"#888780" };
+
+const inp = { padding:"8px 10px", borderRadius:8, border:"0.5px solid var(--color-border-tertiary)", background:"var(--color-background-primary)", color:"var(--color-text-primary)", fontSize:14, width:"100%", boxSizing:"border-box", fontFamily:"inherit" };
+const btn = { padding:"8px 16px", borderRadius:8, border:"0.5px solid var(--color-border-secondary)", background:"transparent", color:"var(--color-text-primary)", fontSize:14, cursor:"pointer", fontFamily:"inherit" };
+const btnP = { ...btn, background:"var(--color-background-info)", color:"var(--color-text-info)", border:"none" };
+const btnPurple = { ...btn, background:"#eeedfe", color:"#3c3489", border:"0.5px solid #afa9ec" };
+const aiBoxStyle = { background:"#e6f1fb", border:"0.5px solid #b5d4f4", borderRadius:12, padding:"1rem", fontSize:14, lineHeight:1.7, whiteSpace:"pre-wrap", color:"#0c447c" };
+const emptyTask = { title:"", desc:"", duration:30, due:"", priority:"Medium", category:"Focus", deps:[] };
+const emptyHabit = { title:"", freq:"daily" };
+const emptyApp = { company:"", role:"", stage:"Job Found", date:"", jdLink:"", jdNotes:"", evaluation:"", evaluationResults:"", resume:"", coverLetter:"", notes:"" };
+const emptyContact = { name:"", company:"", role:"", linkedin:"", category:"", howMet:"", dateMet:"", lastContact:"", nextStep:"", notes:"" };
+const emptyAchievement = { title:"", context:"", situation:"", task:"", action:"", result:"", category:"", tags:"", coachingFeedback:"" };
+const emptyResource = { title:"", url:"", description:"", category:"", tags:"" };
+const emptyMission = { title:"", description:"", priority:"High", status:"Not started", due:"", notes:"" };
+
+/* =========================================================================
+   Small shared components
+   ========================================================================= */
+
+function AIBadge() {
+  return <span title="Needs an Anthropic API key" style={{ fontSize:10, fontWeight:600, letterSpacing:0.3, background:"#534ab7", color:"#fff", borderRadius:4, padding:"1px 5px", marginLeft:6, verticalAlign:"middle" }}>AI</span>;
+}
+
+function NoKeyNotice() {
+  if (hasApiKey()) return null;
+  return <div style={{ fontSize:12, color:"#854f0b", background:"#faeeda", borderRadius:8, padding:"8px 10px", marginBottom:12 }}>AI is off until you add an API key in Settings. Everything else on this page works without it.</div>;
+}
+
+function Field({ label, children }) {
+  return (
+    <div style={{ marginBottom:10 }}>
+      <div style={{ fontSize:12, color:"var(--color-text-secondary)", marginBottom:4 }}>{label}</div>
+      {children}
+    </div>
+  );
+}
+
+function Modal({ show, onClose, maxW, title, children, zIndex }) {
+  if (!show) return null;
+  return (
+    <div style={{ position:"fixed", inset:0, background:"var(--overlay-backdrop)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:zIndex||100, padding:16 }} onClick={onClose}>
+      <div style={{ background:"var(--overlay-bg)", borderRadius:16, padding:"1.5rem", width:"100%", maxWidth:maxW||480, border:"0.5px solid var(--overlay-border)", maxHeight:"90vh", overflowY:"auto" }} onClick={e => e.stopPropagation()}>
+        <div style={{ fontSize:16, fontWeight:500, marginBottom:16 }}>{title}</div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+// Fixed: the original only set innerHTML on mount, so AI-generated text written
+// into a field never appeared until you navigated away and back.
+function RichTextarea({ value, onChange, rows, placeholder }) {
+  const ref = useRef(null);
+  const composing = useRef(false);
+  useEffect(() => {
+    const el = ref.current;
+    const clean = sanitize(value || "");
+    if (el && document.activeElement !== el && el.innerHTML !== clean) el.innerHTML = clean;
+  }, [value]);
+  const emit = () => { if (!composing.current) onChange(ref.current.innerHTML); };
+  const exec = cmd => { document.execCommand(cmd, false); ref.current.focus(); emit(); };
+  const toolBtn = (label, cmd) => (
+    <button type="button" onMouseDown={e => { e.preventDefault(); exec(cmd); }}
+      style={{ ...btn, padding:"2px 8px", fontSize:12, lineHeight:1.4, border:"0.5px solid var(--color-border-tertiary)" }}>{label}</button>
+  );
+  return (
+    <div style={{ border:"0.5px solid var(--color-border-tertiary)", borderRadius:8, overflow:"hidden", background:"var(--color-background-primary)" }}>
+      <div style={{ display:"flex", gap:4, padding:"4px 6px", borderBottom:"0.5px solid var(--color-border-tertiary)", flexWrap:"wrap", background:"var(--color-background-secondary)" }}>
+        {toolBtn("B","bold")}{toolBtn("I","italic")}{toolBtn("U","underline")}{toolBtn("List","insertUnorderedList")}{toolBtn("1. List","insertOrderedList")}{toolBtn("Clear","removeFormat")}
+      </div>
+      <div ref={ref} contentEditable suppressContentEditableWarning onInput={emit}
+        onCompositionStart={() => composing.current = true}
+        onCompositionEnd={() => { composing.current = false; emit(); }}
+        data-placeholder={placeholder}
+        style={{ minHeight:`${(rows||3)*1.6}rem`, padding:"8px 10px", fontSize:14, lineHeight:1.7, color:"var(--color-text-primary)", outline:"none", overflowY:"auto" }} />
+    </div>
+  );
+}
+
+const Html = ({ html, style }) => <div style={style} dangerouslySetInnerHTML={{ __html: sanitize(html) }} />;
+
+function StrengthInput({ color, onAdd, placeholder }) {
+  const [val, setVal] = useState("");
+  const add = () => { if (val.trim()) { onAdd(val); setVal(""); } };
+  return (
+    <div style={{ display:"flex", gap:6 }}>
+      <input value={val} onChange={e => setVal(e.target.value)} onKeyDown={e => { if (e.key === "Enter") add(); }} style={{ ...inp, flex:1, fontSize:13 }} placeholder={placeholder} />
+      <button onClick={add} style={{ ...btn, fontSize:12, padding:"6px 12px", color, borderColor:`${color}66` }}>Add</button>
+    </div>
+  );
+}
+
+function ReflectionEditor({ initialValue, onSave, onCancel }) {
+  const [val, setVal] = useState(initialValue || "");
+  return (
+    <div>
+      <textarea value={val} onChange={e => setVal(e.target.value)} rows={5} style={{ ...inp, resize:"vertical", marginBottom:8, lineHeight:1.7 }} placeholder="Write your answer here - be honest and specific. This is just for you." autoFocus />
+      <div style={{ display:"flex", gap:8 }}>
+        <button onClick={() => onSave(val)} style={{ ...btnP, flex:1 }}>Save answer</button>
+        {onCancel && <button onClick={onCancel} style={{ ...btn, flex:1 }}>Cancel</button>}
+      </div>
+    </div>
+  );
+}
+
+/* =========================================================================
+   Missions (no AI)
+   ========================================================================= */
+
+function MissionsTab({ state, save }) {
+  const missions = state.missions || [];
+  const [showAddM, setShowAddM] = useState(false);
+  const [editingMission, setEditingMission] = useState(null);
+  const [newMission, setNewMission] = useState(emptyMission);
+  const today = todayStr();
+
+  const addMission = () => {
+    if (!newMission.title.trim()) return;
+    save({ ...state, missions:[...missions, { ...newMission, id:uid(), created:Date.now() }] });
+    setNewMission(emptyMission); setShowAddM(false);
+  };
+  const saveMissionEdit = () => { save({ ...state, missions:missions.map(m => m.id === editingMission.id ? editingMission : m) }); setEditingMission(null); };
+  const deleteMission = id => { if (confirm("Delete this mission?")) save({ ...state, missions:missions.filter(m => m.id !== id) }); };
+  const cycleStatus = (e, id) => {
+    e.stopPropagation();
+    save({ ...state, missions:missions.map(m => m.id !== id ? m : { ...m, status:MISSION_STATUSES[(MISSION_STATUSES.indexOf(m.status) + 1) % MISSION_STATUSES.length] }) });
+  };
+
+  const sorted = [...missions].sort((a, b) => {
+    const sd = MISSION_STATUSES.indexOf(a.status) - MISSION_STATUSES.indexOf(b.status); if (sd) return sd;
+    const pd = PRIORITIES.indexOf(a.priority) - PRIORITIES.indexOf(b.priority); if (pd) return pd;
+    if (a.due && b.due) return a.due.localeCompare(b.due);
+    return a.due ? -1 : b.due ? 1 : 0;
+  });
+  const isOverdue = m => m.due && m.due < today && m.status !== "Done";
+  const overdue = sorted.filter(isOverdue);
+  const active = sorted.filter(m => !isOverdue(m) && m.status !== "Done");
+  const done = sorted.filter(m => m.status === "Done");
+
+  const MCard = ({ m }) => {
+    const od = isOverdue(m);
+    const daysLeft = m.due ? daysBetween(today, m.due) : null;
+    return (
+      <div style={{ background:"var(--color-background-primary)", border:"0.5px solid var(--color-border-tertiary)", borderLeft:"3px solid " + (priorityColor[m.priority] || "#888"), borderRadius:8, padding:12, marginBottom:8, opacity:m.status === "Done" ? 0.6 : 1 }}>
+        <div style={{ display:"flex", alignItems:"flex-start", gap:10 }}>
+          <div style={{ flex:1, minWidth:0 }}>
+            <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap", marginBottom:4 }}>
+              <span style={{ fontSize:14, fontWeight:500, textDecoration:m.status === "Done" ? "line-through" : "none", color:m.status === "Done" ? "var(--color-text-tertiary)" : "var(--color-text-primary)" }}>{m.title}</span>
+              <button onClick={e => cycleStatus(e, m.id)} title="Click to change status" style={{ fontSize:11, padding:"2px 8px", borderRadius:20, border:"none", cursor:"pointer", background:MISSION_STATUS_BG[m.status], color:MISSION_STATUS_COLORS[m.status], fontWeight:500 }}>{m.status}</button>
+              <span style={{ fontSize:11, background:"var(--color-background-secondary)", borderRadius:4, padding:"2px 6px", color:priorityColor[m.priority] }}>{m.priority}</span>
+            </div>
+            {m.description && <div style={{ fontSize:13, color:"var(--color-text-secondary)", marginBottom:4 }}>{m.description}</div>}
+            <div style={{ display:"flex", gap:10, flexWrap:"wrap" }}>
+              {m.due && <span style={{ fontSize:12, color:od ? "#e24b4a" : daysLeft <= 3 ? "#ba7517" : "var(--color-text-secondary)" }}>{od ? "Overdue: " : "Due: "}{m.due}{!od && daysLeft <= 7 ? " (" + daysLeft + "d)" : ""}</span>}
+              {m.notes && <span style={{ fontSize:12, color:"var(--color-text-tertiary)", fontStyle:"italic" }}>{m.notes.slice(0, 60)}{m.notes.length > 60 ? "..." : ""}</span>}
+            </div>
+          </div>
+          <div style={{ display:"flex", gap:6, flexShrink:0 }}>
+            <button onClick={() => setEditingMission({ ...m })} style={{ ...btn, padding:"4px 8px", fontSize:12 }}>Edit</button>
+            <button onClick={() => deleteMission(m.id)} style={{ ...btn, padding:"4px 8px", fontSize:12, color:"#e24b4a", borderColor:"#e24b4a" }}>x</button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const form = (m, set) => <>
+    <Field label="Mission title"><input value={m.title} onChange={e => set(x => ({ ...x, title:e.target.value }))} style={inp} placeholder="What is your mission?" /></Field>
+    <Field label="Description"><input value={m.description || ""} onChange={e => set(x => ({ ...x, description:e.target.value }))} style={inp} placeholder="What does success look like?" /></Field>
+    <Field label="Priority"><select value={m.priority} onChange={e => set(x => ({ ...x, priority:e.target.value }))} style={inp}>{PRIORITIES.map(p => <option key={p}>{p}</option>)}</select></Field>
+    <Field label="Status"><select value={m.status} onChange={e => set(x => ({ ...x, status:e.target.value }))} style={inp}>{MISSION_STATUSES.map(s => <option key={s}>{s}</option>)}</select></Field>
+    <Field label="Due date"><input type="date" value={m.due || ""} onChange={e => set(x => ({ ...x, due:e.target.value }))} style={inp} /></Field>
+    <Field label="Notes"><input value={m.notes || ""} onChange={e => set(x => ({ ...x, notes:e.target.value }))} style={inp} placeholder="Any notes or context..." /></Field>
+  </>;
+
+  return (
+    <div>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:4 }}>
+        <div style={{ fontSize:15, fontWeight:500 }}>My missions</div>
+        <button onClick={() => setShowAddM(true)} style={btnP}>+ Add mission</button>
+      </div>
+      <div style={{ fontSize:13, color:"var(--color-text-secondary)", marginBottom:16 }}>Your prioritised goals and missions. Click the status badge to cycle through Not started, In progress and Done.</div>
+      {missions.length === 0 && <div style={{ fontSize:14, color:"var(--color-text-secondary)", padding:"1rem 0" }}>No missions yet. Add your first mission!</div>}
+      {overdue.length > 0 && <div style={{ marginBottom:16 }}><div style={{ fontSize:12, fontWeight:500, color:"#e24b4a", marginBottom:8 }}>Overdue ({overdue.length})</div>{overdue.map(m => <MCard key={m.id} m={m} />)}</div>}
+      {active.length > 0 && <div style={{ marginBottom:16 }}><div style={{ fontSize:12, fontWeight:500, color:"var(--color-text-secondary)", marginBottom:8 }}>Active ({active.length})</div>{active.map(m => <MCard key={m.id} m={m} />)}</div>}
+      {done.length > 0 && <details style={{ marginBottom:8 }}><summary style={{ fontSize:12, fontWeight:500, color:"var(--color-text-secondary)", cursor:"pointer", marginBottom:8 }}>Completed ({done.length})</summary>{done.map(m => <MCard key={m.id} m={m} />)}</details>}
+
+      <Modal show={showAddM} onClose={() => setShowAddM(false)} title="Add mission">
+        {form(newMission, setNewMission)}
+        <div style={{ display:"flex", gap:8, marginTop:16 }}>
+          <button onClick={addMission} style={{ ...btnP, flex:1 }}>Add mission</button>
+          <button onClick={() => setShowAddM(false)} style={{ ...btn, flex:1 }}>Cancel</button>
+        </div>
+      </Modal>
+      <Modal show={!!editingMission} onClose={() => setEditingMission(null)} title="Edit mission">
+        {editingMission && <>
+          {form(editingMission, setEditingMission)}
+          <div style={{ display:"flex", gap:8, marginTop:16 }}>
+            <button onClick={saveMissionEdit} style={{ ...btnP, flex:1 }}>Save</button>
+            <button onClick={() => setEditingMission(null)} style={{ ...btn, flex:1 }}>Cancel</button>
+          </div>
+        </>}
+      </Modal>
+    </div>
+  );
+}
+
+/* =========================================================================
+   Strengths (mostly no AI; CV analysis and role suggestions use AI)
+   ========================================================================= */
+
+function StrengthsTab({ state, save }) {
+  const strengths = state.strengths || defaultState.strengths;
+  const reflectionAnswers = state.reflectionAnswers || {};
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiResult, setAiResult] = useState("");
+  const [aiIsError, setAiIsError] = useState(false);
+  const [activeQ, setActiveQ] = useState(null);
+  const [editingQ, setEditingQ] = useState({});
+
+  const updateSection = (section, arr) => save({ ...state, strengths:{ ...strengths, [section]:arr } });
+  const addStrength = (section, value) => { if (value.trim()) updateSection(section, [...(strengths[section] || []), value.trim()]); };
+  const removeStrength = (section, idx) => updateSection(section, (strengths[section] || []).filter((_, i) => i !== idx));
+  const saveAnswer = (id, val) => { save({ ...state, reflectionAnswers:{ ...reflectionAnswers, [id]:val } }); setEditingQ(p => ({ ...p, [id]:false })); };
+
+  const analyseCV = async () => {
+    if (!state.cv) { setAiIsError(true); setAiResult("No CV saved - please add your CV via the My CV button first."); return; }
+    setAiLoading(true); setAiResult(""); setAiIsError(false);
+    try {
+      const text = await callClaude({ max_tokens:1000,
+        system:"You are a career coach analysing a CV to identify strengths. Be specific, evidence-based and encouraging. Plain text only, no markdown.",
+        messages:[{ role:"user", content:"Analyse this CV and identify the top 5 professional strengths. Format each as a numbered line exactly like: '1. Strength name: one-sentence explanation. Evidence: one specific piece of evidence from the CV.'\n\nCV:\n" + state.cv }] });
+      setAiResult(text);
+    } catch (e) { setAiIsError(true); setAiResult(aiErrorText(e)); }
+    setAiLoading(false);
+  };
+
+  const saveAiStrengths = () => {
+    const extracted = aiResult.split("\n").map(l => l.match(/^\s*\d+[.)]\s*([^:]+):/)).filter(Boolean).map(m => m[1].trim()).slice(0, 5);
+    if (extracted.length) updateSection("cv", [...new Set([...(strengths.cv || []), ...extracted])]);
+  };
+
+  const SECTIONS = [
+    { key:"via",     label:"VIA Character Strengths",   color:"#534ab7", bg:"#eeedfe", desc:"Based on the VIA Survey - 24 universal character strengths like Curiosity, Kindness, Leadership.", link:"https://www.viacharacter.org/account/register", linkLabel:"Take the free VIA Survey" },
+    { key:"clifton", label:"CliftonStrengths (Gallup)", color:"#185fa5", bg:"#e6f1fb", desc:"Based on Gallup CliftonStrengths - 34 talent themes like Achiever, Learner, Relator.", link:"https://www.gallup.com/cliftonstrengths/en/253868/popular-cliftonstrengths-assessment-products.aspx", linkLabel:"Take the CliftonStrengths Assessment" },
+    { key:"cv",      label:"CV / Resume strengths",     color:"#0f6e56", bg:"#e1f5ee", desc:"Strengths identified from your CV by AI analysis or your own reflection." },
+    { key:"other",   label:"Other strengths",           color:"#854f0b", bg:"#faeeda", desc:"Any other strengths identified through feedback, mentors, or self-reflection." },
+  ];
+
+  return (
+    <div>
+      <div style={{ fontSize:15, fontWeight:500, marginBottom:4 }}>Strengths finder</div>
+      <div style={{ fontSize:13, color:"var(--color-text-secondary)", marginBottom:20 }}>Discover and save your top strengths from multiple sources. Use these in interviews, your CV and LinkedIn.</div>
+
+      <div style={{ background:"#e1f5ee", border:"0.5px solid #9fe1cb", borderRadius:12, padding:"1rem", marginBottom:20 }}>
+        <div style={{ fontSize:14, fontWeight:500, color:"#0f6e56", marginBottom:4 }}>AI strengths analysis from your CV<AIBadge /></div>
+        <div style={{ fontSize:13, color:"#0f6e56", opacity:0.85, marginBottom:10 }}>Claude reads your saved CV and identifies your top 5 professional strengths with evidence.</div>
+        {!state.cv && <div style={{ fontSize:12, color:"#ba7517", background:"#faeeda", borderRadius:8, padding:"6px 10px", marginBottom:10 }}>No CV saved - add it via the My CV button first.</div>}
+        <button onClick={analyseCV} disabled={aiLoading} style={{ ...btnP, background:"#1d9e75", color:"#fff" }}>{aiLoading ? "Analysing..." : "Analyse my CV for strengths"}</button>
+        {aiResult && (
+          <div style={{ marginTop:12 }}>
+            <div style={{ background:"#fff", border:"0.5px solid #9fe1cb", borderRadius:8, padding:"10px 12px", fontSize:13, lineHeight:1.7, whiteSpace:"pre-wrap", color:aiIsError ? "#993c1d" : "#085041", marginBottom:8 }}>{aiResult}</div>
+            {!aiIsError && <button onClick={saveAiStrengths} style={{ ...btn, fontSize:12, color:"#0f6e56", borderColor:"#0f6e56" }}>Save top strengths to CV strengths section</button>}
+          </div>
+        )}
+      </div>
+
+      {SECTIONS.map(sec => (
+        <div key={sec.key} style={{ background:sec.bg, border:`0.5px solid ${sec.color}33`, borderRadius:12, padding:"1rem", marginBottom:16 }}>
+          <div style={{ fontSize:14, fontWeight:500, color:sec.color, marginBottom:4 }}>{sec.label}</div>
+          <div style={{ fontSize:12, color:sec.color, opacity:0.8, marginBottom:sec.link ? 8 : 10 }}>{sec.desc}</div>
+          {sec.link && <a href={sec.link} target="_blank" rel="noopener noreferrer" style={{ fontSize:12, color:sec.color, fontWeight:500, display:"inline-block", marginBottom:10 }}>{sec.linkLabel}</a>}
+          <div style={{ display:"flex", flexWrap:"wrap", gap:6, marginBottom:10 }}>
+            {(strengths[sec.key] || []).map((s, i) => (
+              <div key={i} style={{ background:"#fff", border:`0.5px solid ${sec.color}44`, borderRadius:20, padding:"4px 10px", fontSize:13, color:sec.color, display:"flex", alignItems:"center", gap:6 }}>
+                <span>{s}</span>
+                <button onClick={() => removeStrength(sec.key, i)} style={{ background:"none", border:"none", cursor:"pointer", color:sec.color, opacity:0.6, fontSize:14, padding:0, lineHeight:1 }}>x</button>
+              </div>
+            ))}
+            {!(strengths[sec.key] || []).length && <div style={{ fontSize:12, color:sec.color, opacity:0.6 }}>No strengths added yet.</div>}
+          </div>
+          <StrengthInput color={sec.color} onAdd={val => addStrength(sec.key, val)} placeholder={"Add a " + sec.label.toLowerCase() + " strength..."} />
+        </div>
+      ))}
+
+      {Object.values(strengths).some(arr => arr.length > 0) && (
+        <div style={{ background:"var(--color-background-secondary)", borderRadius:12, padding:"1rem", marginBottom:24 }}>
+          <div style={{ fontSize:14, fontWeight:500, marginBottom:8 }}>Your strength profile</div>
+          <div style={{ display:"flex", flexWrap:"wrap", gap:6 }}>
+            {Object.entries(strengths).flatMap(([k, arr]) => arr.map(s => ({ s, color:SECTIONS.find(sec => sec.key === k)?.color || "#888" }))).map(({ s, color }, i) => (
+              <span key={i} style={{ background:"var(--color-background-primary)", border:`0.5px solid ${color}44`, borderRadius:20, padding:"4px 12px", fontSize:13, color }}>{s}</span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div style={{ borderTop:"0.5px solid var(--color-border-tertiary)", paddingTop:20, marginBottom:24 }}>
+        <div style={{ fontSize:15, fontWeight:500, marginBottom:4 }}>Section 1 - Reflection questions</div>
+        <div style={{ fontSize:13, color:"var(--color-text-secondary)", marginBottom:16 }}>Let us identify what may need to change. Take your time with each question - there are no right or wrong answers.</div>
+        {REFLECTION_QUESTIONS.map((q, qi) => {
+          const answer = reflectionAnswers[q.id] || "";
+          const isEditing = editingQ[q.id];
+          const isOpen = activeQ === q.id || isEditing;
+          return (
+            <div key={q.id} style={{ marginBottom:12, background:"var(--color-background-primary)", border:"0.5px solid var(--color-border-tertiary)", borderLeft:"3px solid #534ab7", borderRadius:8, overflow:"hidden" }}>
+              <button onClick={() => setActiveQ(isOpen && !isEditing ? null : q.id)} style={{ ...btn, width:"100%", textAlign:"left", border:"none", borderRadius:0, padding:"12px 14px", display:"flex", justifyContent:"space-between", alignItems:"center", gap:8 }}>
+                <div>
+                  <div style={{ fontSize:12, color:"#534ab7", fontWeight:500, marginBottom:2 }}>Question {qi + 1}</div>
+                  <div style={{ fontSize:14, fontWeight:500 }}>{q.question}</div>
+                </div>
+                <div style={{ display:"flex", alignItems:"center", gap:8, flexShrink:0 }}>
+                  {answer && !isEditing && <span style={{ fontSize:11, background:"#eeedfe", color:"#534ab7", borderRadius:4, padding:"2px 8px" }}>Answered</span>}
+                  <span style={{ fontSize:14, color:"var(--color-text-secondary)" }}>{isOpen ? "▲" : "▼"}</span>
+                </div>
+              </button>
+              {isOpen && (
+                <div style={{ padding:"0 14px 14px" }}>
+                  {isEditing || !answer ? (
+                    <ReflectionEditor initialValue={answer} onSave={val => saveAnswer(q.id, val)} onCancel={() => { setEditingQ(p => ({ ...p, [q.id]:false })); if (!answer) setActiveQ(null); }} />
+                  ) : (
+                    <div>
+                      <div style={{ fontSize:13, lineHeight:1.8, background:"var(--color-background-secondary)", borderRadius:8, padding:"10px 12px", marginBottom:10, whiteSpace:"pre-wrap" }}>{answer}</div>
+                      <button onClick={() => setEditingQ(p => ({ ...p, [q.id]:true }))} style={{ ...btn, fontSize:12, padding:"4px 12px", color:"#534ab7", borderColor:"#534ab7" }}>Edit answer</button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      <FeedbackTableSection state={state} save={save} />
+      <MyThoughtsSection state={state} save={save} />
+      <AISuggestedRolesSection state={state} />
+    </div>
+  );
+}
+
+function FeedbackTableSection({ state, save }) {
+  const rows = state.feedbackTable?.rows || defaultState.feedbackTable.rows;
+  const setRows = next => save({ ...state, feedbackTable:{ rows:next } });
+  const updateRow = (i, field, val) => setRows(rows.map((r, ri) => ri === i ? { ...r, [field]:val } : r));
+  const names = (state.contacts || []).map(c => c.name).filter(Boolean);
+  const cellInp = { ...inp, padding:"5px 6px", borderRadius:4, fontSize:12, minWidth:110 };
+  const cols = [["think","e.g. Analytical, strategic..."],["people","e.g. Collaborative, empathetic..."],["communicate","e.g. Clear, persuasive..."],["other","Other strengths..."]];
+  return (
+    <div style={{ borderTop:"0.5px solid var(--color-border-tertiary)", paddingTop:20, marginBottom:24 }}>
+      <div style={{ fontSize:15, fontWeight:500, marginBottom:4 }}>Section 2 - Analyse your feedback</div>
+      <div style={{ fontSize:13, color:"var(--color-text-secondary)", marginBottom:14 }}>Ask people you trust to describe your strengths. Record their feedback below.</div>
+      {names.length > 0 && <datalist id="contact-names">{names.map(n => <option key={n} value={n} />)}</datalist>}
+      <div style={{ overflowX:"auto" }}>
+        <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12 }}>
+          <thead><tr>
+            {["Name","The way I think","The way I work with people","The way I communicate","Any other strengths",""].map(h => (
+              <th key={h} style={{ padding:"8px 6px", textAlign:"left", fontSize:11, fontWeight:500, color:"var(--color-text-secondary)", borderBottom:"0.5px solid var(--color-border-tertiary)", whiteSpace:"nowrap" }}>{h}</th>
+            ))}
+          </tr></thead>
+          <tbody>
+            {rows.map((row, i) => (
+              <tr key={i} style={{ borderBottom:"0.5px solid var(--color-border-tertiary)" }}>
+                <td style={{ padding:4 }}><input value={row.name} onChange={e => updateRow(i, "name", e.target.value)} style={cellInp} placeholder="Name..." list="contact-names" /></td>
+                {cols.map(([f, ph]) => <td key={f} style={{ padding:4 }}><input value={row[f]} onChange={e => updateRow(i, f, e.target.value)} style={cellInp} placeholder={ph} /></td>)}
+                <td style={{ padding:4 }}><button onClick={() => rows.length > 1 && setRows(rows.filter((_, ri) => ri !== i))} style={{ ...btn, padding:"2px 6px", fontSize:11, color:"#e24b4a", borderColor:"#e24b4a" }}>x</button></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <button onClick={() => setRows([...rows, emptyFeedbackRow()])} style={{ ...btn, fontSize:12, marginTop:10, color:"#534ab7", borderColor:"#534ab7" }}>+ Add row</button>
+    </div>
+  );
+}
+
+function MyThoughtsSection({ state, save }) {
+  const thoughts = state.myThoughts || defaultState.myThoughts;
+  const update = (field, val) => save({ ...state, myThoughts:{ ...thoughts, [field]:val } });
+  const ta = { ...inp, fontSize:13, resize:"vertical", lineHeight:1.7 };
+  const items = [
+    ["patterns","What patterns do I notice in the feedback?","What themes or patterns keep coming up across different people's feedback?"],
+    ["surprised","What surprised me?","Was there any feedback you did not expect? What does that tell you?"],
+    ["actions","What actions will I take based on this feedback?","What will you do differently or lean into more based on what you have learned?"],
+  ];
+  return (
+    <div style={{ borderTop:"0.5px solid var(--color-border-tertiary)", paddingTop:20, marginBottom:24 }}>
+      <div style={{ fontSize:15, fontWeight:500, marginBottom:4 }}>Section 3 - My thoughts</div>
+      <div style={{ fontSize:13, color:"var(--color-text-secondary)", marginBottom:16 }}>Reflect on the feedback you received. What stands out? What surprised you?</div>
+      {items.map(([k, label, ph]) => (
+        <div key={k} style={{ marginBottom:12 }}>
+          <div style={{ fontSize:13, fontWeight:500, color:"#534ab7", marginBottom:6 }}>{label}</div>
+          <textarea value={thoughts[k]} onChange={e => update(k, e.target.value)} rows={4} style={ta} placeholder={ph} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function AISuggestedRolesSection({ state }) {
+  const [roles, setRoles] = useState("");
+  const [loading, setLoading] = useState(false);
+  const buildContext = () => {
+    const s = state.strengths || {};
+    const j = a => (a || []).join(", ") || "not provided";
+    const r = state.reflectionAnswers || {};
+    const feedback = (state.feedbackTable?.rows || []).filter(x => x.name).map(x => `${x.name}: thinks(${x.think}), people(${x.people}), communicates(${x.communicate}), other(${x.other})`).join("; ");
+    const t = state.myThoughts || {};
+    return `Based on the following profile, suggest roles this person would enjoy and excel in.
+
+Strengths:
+- VIA character strengths: ${j(s.via)}
+- CliftonStrengths: ${j(s.clifton)}
+- CV strengths: ${j(s.cv)}
+- Other strengths: ${j(s.other)}
+
+Reflection answers:
+- What they enjoy most: ${r.enjoy || "not provided"}
+- What they are known for: ${r.known || "not provided"}
+- Their top strengths: ${r.strengths || "not provided"}
+- What makes them special: ${r.special || "not provided"}
+
+Feedback from others: ${feedback || "not provided"}
+
+Personal reflections: ${[t.patterns, t.surprised, t.actions].filter(Boolean).join(" ") || "not provided"}
+
+CV summary: ${(state.cv || "").slice(0, 800) || "not provided"}
+
+Please suggest 8-12 specific roles this person would enjoy and be well suited to. For each role list just the role name as a bullet point. Then add a brief paragraph explaining the common themes across these suggestions.`;
+  };
+  const suggest = async () => {
+    setLoading(true); setRoles("");
+    try { setRoles(await callClaude({ max_tokens:1200, system:"You are a career coach. Suggest specific job roles based on a person's strengths and feedback profile. Be specific, practical and encouraging. Plain text only.", messages:[{ role:"user", content:buildContext() }] })); }
+    catch (e) { setRoles(aiErrorText(e)); }
+    setLoading(false);
+  };
+  return (
+    <div style={{ borderTop:"0.5px solid var(--color-border-tertiary)", paddingTop:20 }}>
+      <div style={{ fontSize:15, fontWeight:500, marginBottom:4 }}>Section 4 - AI suggested roles<AIBadge /></div>
+      <div style={{ fontSize:13, color:"var(--color-text-secondary)", marginBottom:14 }}>Based on your strengths, feedback and reflections, the AI suggests roles you would enjoy and excel in.</div>
+      <button onClick={suggest} disabled={loading} style={{ ...btnPurple, marginBottom:16 }}>{loading ? "Thinking..." : "Suggest roles for me"}</button>
+      {roles && <div style={{ ...aiBoxStyle, lineHeight:1.9 }}>{roles}</div>}
+    </div>
+  );
+}
+
+/* =========================================================================
+   Resources modal, CV modal, Settings (no AI)
+   ========================================================================= */
+
+function AddResourceModal({ newResource, setNewResource, onAdd, onClose }) {
+  const [view, setView] = useState("suggest");
+  const [activeCategory, setActiveCategory] = useState("Job Boards");
+  const pick = s => { setNewResource({ title:s?.title || "", url:s?.url || "", description:s?.description || "", category:activeCategory, tags:"" }); setView("form"); };
+
+  if (view === "form") return (
+    <div>
+      <button onClick={() => setView("suggest")} style={{ ...btn, fontSize:12, marginBottom:16 }}>Back to suggestions</button>
+      <Field label="Title"><input value={newResource.title} onChange={e => setNewResource(r => ({ ...r, title:e.target.value }))} style={inp} placeholder="Resource name..." /></Field>
+      <Field label="URL"><input value={newResource.url} onChange={e => setNewResource(r => ({ ...r, url:e.target.value }))} style={inp} placeholder="https://..." /></Field>
+      <Field label="Category"><input value={newResource.category} onChange={e => setNewResource(r => ({ ...r, category:e.target.value }))} style={inp} placeholder="e.g. Job Board, Learning, Tool..." /></Field>
+      <Field label="Description"><input value={newResource.description} onChange={e => setNewResource(r => ({ ...r, description:e.target.value }))} style={inp} placeholder="Short note about this resource..." /></Field>
+      <Field label="Tags (comma separated)"><input value={newResource.tags} onChange={e => setNewResource(r => ({ ...r, tags:e.target.value }))} style={inp} placeholder="e.g. python, remote, free..." /></Field>
+      <div style={{ display:"flex", gap:8, marginTop:16 }}>
+        <button onClick={onAdd} style={{ ...btnP, flex:1 }}>Add resource</button>
+        <button onClick={onClose} style={{ ...btn, flex:1 }}>Cancel</button>
+      </div>
+    </div>
+  );
+
+  const c = SUGGESTION_COLORS[activeCategory];
+  return (
+    <div>
+      <div style={{ fontSize:13, color:"var(--color-text-secondary)", marginBottom:12 }}>Pick a suggestion to pre-fill the form, or add a custom link.</div>
+      <div style={{ display:"flex", gap:6, flexWrap:"wrap", marginBottom:14 }}>
+        {Object.keys(RESOURCE_SUGGESTIONS).map(cat => {
+          const cc = SUGGESTION_COLORS[cat]; const active = activeCategory === cat;
+          return <button key={cat} onClick={() => setActiveCategory(cat)} style={{ ...btn, fontSize:12, padding:"4px 10px", background:active ? cc.bg : "transparent", color:active ? cc.text : "var(--color-text-secondary)", border:`0.5px solid ${active ? cc.border : "var(--color-border-tertiary)"}`, fontWeight:active ? 500 : 400 }}>{cat}</button>;
+        })}
+      </div>
+      <div style={{ display:"flex", flexDirection:"column", gap:8, marginBottom:12 }}>
+        {RESOURCE_SUGGESTIONS[activeCategory].map(s => (
+          <div key={s.title} onClick={() => pick(s)} style={{ background:c.bg, border:`0.5px solid ${c.border}`, borderRadius:8, padding:"10px 12px", cursor:"pointer", display:"flex", justifyContent:"space-between", alignItems:"center", gap:8 }}>
+            <div>
+              <div style={{ fontSize:13, fontWeight:500, color:c.text }}>{s.title}</div>
+              <div style={{ fontSize:12, color:c.text, opacity:0.8, marginTop:2 }}>{s.description}</div>
+            </div>
+            <span style={{ fontSize:12, color:c.text, flexShrink:0 }}>+ Add</span>
+          </div>
+        ))}
+        {activeCategory === "Personal Bookmarks" && <div style={{ fontSize:13, color:"var(--color-text-secondary)", padding:"4px 0" }}>Add any custom link you want to track.</div>}
+      </div>
+      <button onClick={() => pick(null)} style={{ ...btn, width:"100%", fontSize:13, borderStyle:"dashed", color:"var(--color-text-secondary)" }}>+ Add custom {activeCategory} link</button>
+    </div>
+  );
+}
+
+function CvLinkedInModal({ state, save, onClose }) {
+  const [activeSection, setActiveSection] = useState("cv");
+  const [cvText, setCvText] = useState(state.cv || "");
+  const [myName, setMyName] = useState(state.myName || "");
+  const [liSections, setLiSections] = useState(state.linkedInSections || {});
+  const saveAll = () => { save({ ...state, cv:cvText, myName, linkedInSections:liSections }); onClose(); };
+  const PLACEHOLDERS = {
+    "Headline":"e.g. Senior Product Manager | Driving Growth in FinTech",
+    "Summary / About":"Your LinkedIn About section...",
+    "Experience":"Work experience entries - roles, companies, dates, bullet points...",
+    "Skills":"e.g. Product Strategy, Agile, Data Analysis...",
+    "Education":"Degrees, institutions, graduation years...",
+    "Certifications":"e.g. AWS Certified, PMP, Google Analytics...",
+  };
+  return (
+    <div>
+      <div style={{ display:"flex", gap:6, flexWrap:"wrap", marginBottom:16 }}>
+        {["cv", ...LI_SECTIONS].map(s => {
+          const active = activeSection === s;
+          const hasContent = s === "cv" ? !!cvText : !!liSections[s];
+          return <button key={s} onClick={() => setActiveSection(s)} style={{ ...btn, fontSize:12, padding:"4px 10px", background:active ? "#534ab7" : "transparent", color:active ? "#fff" : "var(--color-text-secondary)", border:`0.5px solid ${active ? "#534ab7" : "var(--color-border-tertiary)"}` }}>{s === "cv" ? "My CV" : s}{hasContent ? " ✓" : ""}</button>;
+        })}
+      </div>
+      {activeSection === "cv" ? (
+        <div>
+          <Field label="My name (used in AI prompts and feedback templates)"><input value={myName} onChange={e => setMyName(e.target.value)} style={inp} placeholder="Your full name e.g. Alex Smith" /></Field>
+          <div style={{ fontSize:13, color:"var(--color-text-secondary)", marginBottom:8 }}>Used by AI to evaluate roles, generate resumes, cover letters, and salary estimates. Stored only in this browser.</div>
+          <textarea value={cvText} onChange={e => setCvText(e.target.value)} rows={14} style={{ ...inp, resize:"vertical", fontFamily:"var(--font-mono)", fontSize:13 }} placeholder="Paste your full CV / resume text here..." />
+        </div>
+      ) : (
+        <div>
+          <div style={{ fontSize:13, color:"var(--color-text-secondary)", marginBottom:8 }}>Store your best version here after refining with the AI coach.</div>
+          <textarea value={liSections[activeSection] || ""} onChange={e => setLiSections(p => ({ ...p, [activeSection]:e.target.value }))} rows={activeSection === "Experience" || activeSection === "Summary / About" ? 12 : 6} style={{ ...inp, resize:"vertical" }} placeholder={PLACEHOLDERS[activeSection]} />
+        </div>
+      )}
+      <div style={{ display:"flex", gap:8, marginTop:16 }}>
+        <button onClick={saveAll} style={{ ...btnP, flex:1 }}>Save all</button>
+        <button onClick={onClose} style={{ ...btn, flex:1 }}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+function SettingsModal({ onClose }) {
+  const [s, setS] = useState(loadSettings);
+  const [show, setShow] = useState(false);
+  const [status, setStatus] = useState("");
+  const saveSettings = () => { lsSet(SETTINGS_KEY, { ...s, apiKey:s.apiKey.trim() }); setStatus("Saved."); };
+  const test = async () => {
+    lsSet(SETTINGS_KEY, { ...s, apiKey:s.apiKey.trim() });
+    setStatus("Testing...");
+    try { await callClaude({ max_tokens:10, system:"Reply with OK.", messages:[{ role:"user", content:"Ping" }] }); setStatus("Connected. AI features are on."); }
+    catch (e) { setStatus(aiErrorText(e)); }
+  };
+  const remove = () => { lsSet(SETTINGS_KEY, { ...s, apiKey:"" }); setS(p => ({ ...p, apiKey:"" })); setStatus("Key removed. AI features are off."); };
+  return (
+    <div>
+      <div style={{ fontSize:13, color:"var(--color-text-secondary)", marginBottom:12, lineHeight:1.6 }}>
+        AI features are optional. They call the Anthropic API directly from your browser using your own key, and are billed to your Anthropic account. Get a key at <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener noreferrer">console.anthropic.com</a>.
+      </div>
+      <Field label="Anthropic API key">
+        <div style={{ display:"flex", gap:6 }}>
+          <input type={show ? "text" : "password"} value={s.apiKey} onChange={e => setS(p => ({ ...p, apiKey:e.target.value }))} style={{ ...inp, flex:1, fontFamily:"var(--font-mono)" }} placeholder="sk-ant-..." autoComplete="off" />
+          <button onClick={() => setShow(x => !x)} style={{ ...btn, fontSize:12, padding:"6px 10px" }}>{show ? "Hide" : "Show"}</button>
+        </div>
+      </Field>
+      <Field label="Model">
+        <input value={s.model} onChange={e => setS(p => ({ ...p, model:e.target.value }))} style={{ ...inp, fontFamily:"var(--font-mono)" }} placeholder={DEFAULT_MODEL} />
+      </Field>
+      <div style={{ fontSize:12, color:"#854f0b", background:"#faeeda", borderRadius:8, padding:"8px 10px", marginBottom:12, lineHeight:1.6 }}>
+        Your key is saved in this browser's localStorage only. It is never included in Export, but any script running on this same site origin could read it. Use a key with a low spend limit, and do not save it on a shared computer.
+      </div>
+      {status && <div style={{ fontSize:13, marginBottom:10 }}>{status}</div>}
+      <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+        <button onClick={saveSettings} style={{ ...btnP, flex:1 }}>Save</button>
+        <button onClick={test} disabled={!s.apiKey.trim()} style={{ ...btnPurple, flex:1 }}>Save and test</button>
+        <button onClick={remove} style={{ ...btn, flex:1, color:"#e24b4a", borderColor:"#e24b4a" }}>Remove key</button>
+        <button onClick={onClose} style={{ ...btn, flex:1 }}>Close</button>
+      </div>
+    </div>
+  );
+}
+
+/* =========================================================================
+   AI views
+   ========================================================================= */
+
+function ChatLog({ messages, loading, chatRef, maxH, label }) {
+  return (
+    <div ref={chatRef} style={{ maxHeight:maxH, overflowY:"auto", display:"flex", flexDirection:"column", gap:10, padding:"4px 0", marginBottom:12 }}>
+      {messages.map((m, i) => (
+        <div key={i} style={{ display:"flex", justifyContent:m.role === "user" ? "flex-end" : "flex-start" }}>
+          <div style={{ maxWidth:"88%", background:m.role === "user" ? "#eeedfe" : "#e6f1fb", borderRadius:12, padding:"10px 14px", fontSize:13, lineHeight:1.8, whiteSpace:"pre-wrap", color:m.role === "user" ? "#3c3489" : "#0c447c" }}>
+            {m.role === "assistant" && label && <div style={{ fontSize:11, color:"#185fa5", marginBottom:4, fontWeight:500 }}>{label}</div>}
+            {m.text}
+          </div>
+        </div>
+      ))}
+      {loading && <div style={{ display:"flex" }}><div style={{ background:"#e6f1fb", borderRadius:12, padding:"10px 14px", fontSize:13, color:"#0c447c" }}>Thinking...</div></div>}
+    </div>
+  );
+}
+
+// Fixed: section switching now works from the "AI: LinkedIn" tab (the original
+// passed no-op setters there), and the conversation sent to the API starts with a user turn.
+function LinkedInReviewChat({ savedSections, onBack }) {
+  const [liSection, setLiSection] = useState("Headline");
+  const [liContent, setLiContent] = useState(() => ({ ...(savedSections || {}) }));
+  const [messages, setMessages] = useState([]);
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [started, setStarted] = useState(false);
+  const chatRef = useRef(null);
+  useEffect(() => { if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight; }, [messages, loading]);
+
+  const opener = () => "Please review my LinkedIn " + liSection + " and give specific feedback and a rewritten version.";
+  const sysPrompt = () => "You are an expert LinkedIn profile coach reviewing the " + liSection + " section. Current content:\n\n\"" + (liContent[liSection] || "(not provided)") + "\"\n\nHelp improve through conversation. Offer specific rewrites, ask clarifying questions, refine based on feedback. Be encouraging, specific, concise. Plain text.";
+  const run = async msgs => {
+    setLoading(true);
+    try { const text = await callClaude({ max_tokens:1500, system:sysPrompt(), messages:toApiMessages(opener(), msgs) }); setMessages([...msgs, { role:"assistant", text }]); }
+    catch (e) { setMessages([...msgs, { role:"assistant", text:aiErrorText(e) }]); }
+    setLoading(false);
+  };
+  const startReview = async () => {
+    setStarted(true);
+    if (!(liContent[liSection] || "").trim()) { setMessages([{ role:"assistant", text:"Please paste your " + liSection + " content above first." }]); return; }
+    setLoading(true);
+    try { setMessages([{ role:"assistant", text:await callClaude({ max_tokens:1500, system:sysPrompt(), messages:[{ role:"user", content:opener() }] }) }]); }
+    catch (e) { setMessages([{ role:"assistant", text:aiErrorText(e) }]); }
+    setLoading(false);
+  };
+  const send = () => { if (!input.trim() || loading) return; const msgs = [...messages, { role:"user", text:input.trim() }]; setInput(""); setMessages(msgs); run(msgs); };
+  const reset = () => { setMessages([]); setStarted(false); setInput(""); };
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
+      {onBack && <button onClick={onBack} style={{ ...btn, fontSize:13, alignSelf:"flex-start" }}>Back</button>}
+      <div style={{ fontSize:16, fontWeight:500 }}>LinkedIn profile review<AIBadge /></div>
+      <NoKeyNotice />
+      <div style={{ fontSize:13, color:"var(--color-text-secondary)" }}>Select a section, paste content, then chat to refine it.</div>
+      <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+        {LI_SECTIONS.map(s => <button key={s} onClick={() => { setLiSection(s); reset(); }} style={{ ...btn, fontSize:12, padding:"4px 12px", background:liSection === s ? "#534ab7" : "transparent", color:liSection === s ? "#fff" : "var(--color-text-secondary)", border:`0.5px solid ${liSection === s ? "#534ab7" : "var(--color-border-tertiary)"}` }}>{s}</button>)}
+      </div>
+      <div>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:4 }}>
+          <div style={{ fontSize:12, color:"var(--color-text-secondary)" }}>Your current {liSection} content</div>
+          {savedSections?.[liSection] && <div style={{ fontSize:11, color:"#1d9e75" }}>Pre-loaded from My CV</div>}
+        </div>
+        <textarea value={liContent[liSection] || ""} onChange={e => { setLiContent(p => ({ ...p, [liSection]:e.target.value })); if (started) reset(); }} rows={4} style={{ ...inp, resize:"vertical" }} placeholder={"Paste your LinkedIn " + liSection + " here..."} />
+      </div>
+      {!started
+        ? <button onClick={startReview} style={{ ...btnPurple, width:"100%" }}>Review {liSection}</button>
+        : <div>
+            <ChatLog messages={messages} loading={loading} chatRef={chatRef} maxH={380} />
+            <div style={{ display:"flex", gap:8 }}>
+              <input value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === "Enter" && send()} style={{ ...inp, flex:1 }} placeholder="Ask for tweaks..." />
+              <button onClick={send} disabled={loading} style={{ ...btnPurple, whiteSpace:"nowrap" }}>Send</button>
+            </div>
+            <button onClick={reset} style={{ ...btn, fontSize:12, marginTop:8, color:"var(--color-text-tertiary)" }}>Start over</button>
+          </div>}
+    </div>
+  );
+}
+
+// Fixed: saveSession / deleteSession / continueSession / clearActiveSession were
+// defined inside LinkedInReviewChat in the original, so "Save and exit" crashed here.
+const IV_ACTIVE = "pt_interview_active_v2";
+const IV_SESSIONS = "pt_interview_sessions";
+const IV_OPENER = "I am ready to start.";
+
+function InterviewPracticeChat({ state, onBack }) {
+  const saved = lsGet(IV_ACTIVE, null);
+  const [phase, setPhase] = useState(saved?.messages?.length ? "chat" : "setup");
+  const [sessionId, setSessionId] = useState(saved?.id || null);
+  const [selectedApp, setSelectedApp] = useState(saved?.selectedApp || null);
+  const [questionTypes, setQuestionTypes] = useState(saved?.questionTypes || ["behavioural","situational","competency"]);
+  const [messages, setMessages] = useState(saved?.messages || []);
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [savedSessions, setSavedSessions] = useState(() => lsGet(IV_SESSIONS, []));
+  const chatRef = useRef(null);
+
+  useEffect(() => { if (messages.length) lsSet(IV_ACTIVE, { id:sessionId, selectedApp, questionTypes, messages }); }, [messages]);
+  useEffect(() => { if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight; }, [messages, loading]);
+
+  const persistSessions = list => { setSavedSessions(list); lsSet(IV_SESSIONS, list); };
+  const saveAndExit = () => {
+    if (messages.length) {
+      const session = { id:sessionId || Date.now(), date:new Date().toLocaleDateString("en-AU"), role:selectedApp ? selectedApp.role + " @ " + selectedApp.company : "General practice", selectedApp, questionTypes, messages, messageCount:messages.filter(m => m.role === "user").length };
+      persistSessions([session, ...savedSessions.filter(s => s.id !== session.id)].slice(0, 10));
+    }
+    lsDel(IV_ACTIVE); setMessages([]); setSessionId(null); setPhase("setup");
+  };
+  const deleteSession = id => { if (confirm("Delete this saved session?")) persistSessions(savedSessions.filter(s => s.id !== id)); };
+  const continueSession = s => { setSessionId(s.id); setSelectedApp(s.selectedApp || null); setQuestionTypes(s.questionTypes || ["behavioural"]); setMessages(s.messages || []); setPhase("chat"); };
+  const toggleType = id => setQuestionTypes(p => p.includes(id) ? p.filter(x => x !== id) : [...p, id]);
+
+  const buildSystem = () => {
+    const role = selectedApp ? selectedApp.role + " at " + selectedApp.company : "a general role";
+    const jd = selectedApp ? "JD notes: " + (stripHtml(selectedApp.jdNotes) || "none") : "";
+    const types = questionTypes.map(t => QUESTION_TYPES.find(q => q.id === t)?.label).join(", ");
+    const achievements = (state.achievements || []).slice(0, 8).map(a => "- " + a.title + ": " + stripHtml(a.action) + " => " + stripHtml(a.result)).join("\n");
+    const prev = savedSessions.filter(s => s.id !== sessionId).slice(0, 3).map((s, i) => "Session " + (i + 1) + " (" + s.date + "): " + s.role + " - sample answers: " + s.messages.filter(m => m.role === "user").slice(0, 5).map(m => m.text).join(" | ").slice(0, 400)).join("\n\n");
+    return INTERVIEW_GUIDE + "\n\nYou are an expert interview coach running a mock session. Track improvement across sessions. Plain text, no markdown.\n\nRole: " + role + "\n" + jd + "\nCV: " + (state.cv || "(No CV provided)").slice(0, 1200) + "\nAchievements:\n" + (achievements || "(none)") + "\nQuestion types: " + types +
+      (prev ? "\n\nPREVIOUS SESSION HISTORY (for tracking improvement):\n" + prev + "\n\nAs the session progresses, note improvements compared to previous sessions. Reference specific growth in clarity, use of CAR structure, specificity and authenticity." : "") +
+      "\n\nIf there are already messages in the conversation, this is a CONTINUED session - do not re-introduce yourself. Ask one question at a time, give CAR coaching feedback after each answer, mix types, offer a progress summary every 3-4 questions.";
+  };
+  const run = async msgs => {
+    setLoading(true);
+    try { const text = await callClaude({ max_tokens:1500, system:buildSystem(), messages:toApiMessages(IV_OPENER, msgs) }); setMessages([...msgs, { role:"assistant", text }]); }
+    catch (e) { setMessages([...msgs, { role:"assistant", text:aiErrorText(e) }]); }
+    setLoading(false);
+  };
+  const startSession = async () => {
+    setSessionId(Date.now()); setPhase("chat"); setLoading(true);
+    try { setMessages([{ role:"assistant", text:await callClaude({ max_tokens:1000, system:buildSystem(), messages:[{ role:"user", content:IV_OPENER }] }) }]); }
+    catch (e) { setMessages([{ role:"assistant", text:aiErrorText(e) }]); }
+    setLoading(false);
+  };
+  const send = () => { if (!input.trim() || loading) return; const msgs = [...messages, { role:"user", text:input.trim() }]; setInput(""); setMessages(msgs); run(msgs); };
+  const getSummary = () => { if (loading) return; const msgs = [...messages, { role:"user", text:"Give me a full performance summary - strengths, improvements, tips for my real interview." }]; setMessages(msgs); run(msgs); };
+
+  if (phase === "setup") return (
+    <div>
+      {onBack && <button onClick={onBack} style={{ ...btn, marginBottom:16, fontSize:13 }}>Back</button>}
+      <div style={{ fontSize:16, fontWeight:500, marginBottom:4 }}>Interview practice<AIBadge /></div>
+      <div style={{ fontSize:13, color:"var(--color-text-secondary)", marginBottom:16 }}>Powered by the JobAccelerator 22 Ways framework.</div>
+      <NoKeyNotice />
+      <div style={{ fontSize:13, fontWeight:500, marginBottom:8 }}>Select a job to practise for</div>
+      <div style={{ marginBottom:16 }}>
+        {[null, ...state.applications].map(a => {
+          const sel = (selectedApp?.id || null) === (a?.id || null);
+          return (
+            <div key={a?.id || "general"} onClick={() => setSelectedApp(a)} style={{ background:sel ? "#eeedfe" : "var(--color-background-primary)", border:"0.5px solid " + (sel ? "#7f77dd" : "var(--color-border-tertiary)"), borderRadius:8, padding:"10px 12px", marginBottom:6, cursor:"pointer" }}>
+              <div style={{ fontSize:13, fontWeight:500, color:sel ? "#3c3489" : "var(--color-text-primary)" }}>{a ? a.role + " @ " + a.company : "General practice (no specific role)"}</div>
+              {a && <div style={{ fontSize:11, color:"var(--color-text-secondary)", marginTop:2 }}>{a.stage}</div>}
+            </div>
+          );
+        })}
+      </div>
+      <div style={{ fontSize:13, fontWeight:500, marginBottom:8 }}>Question types</div>
+      <div style={{ display:"flex", gap:6, flexWrap:"wrap", marginBottom:20 }}>
+        {QUESTION_TYPES.map(t => { const on = questionTypes.includes(t.id); return <button key={t.id} onClick={() => toggleType(t.id)} style={{ ...btn, fontSize:12, padding:"5px 12px", background:on ? t.color : "transparent", color:on ? "#fff" : "var(--color-text-secondary)", border:"0.5px solid " + (on ? t.color : "var(--color-border-tertiary)") }}>{t.label}</button>; })}
+      </div>
+      <button onClick={startSession} disabled={questionTypes.length === 0} style={{ ...btnPurple, width:"100%" }}>Start new interview practice</button>
+
+      {savedSessions.length > 0 && (
+        <div style={{ marginTop:20, borderTop:"0.5px solid var(--color-border-tertiary)", paddingTop:16 }}>
+          <div style={{ fontSize:14, fontWeight:500, marginBottom:6 }}>Previous sessions</div>
+          <div style={{ fontSize:12, color:"var(--color-text-secondary)", marginBottom:10 }}>Your answers from previous sessions are used by the AI coach to track your improvement over time. Saved in this browser only (last 10).</div>
+          {savedSessions.map(s => (
+            <div key={s.id} style={{ background:"var(--color-background-primary)", border:"0.5px solid var(--color-border-tertiary)", borderRadius:8, padding:"10px 12px", marginBottom:8, display:"flex", justifyContent:"space-between", alignItems:"center", gap:8 }}>
+              <div>
+                <div style={{ fontSize:13, fontWeight:500 }}>{s.role}</div>
+                <div style={{ fontSize:12, color:"var(--color-text-secondary)", marginTop:2 }}>{s.date} - {s.messageCount} answer{s.messageCount !== 1 ? "s" : ""}</div>
+              </div>
+              <div style={{ display:"flex", gap:6, flexShrink:0 }}>
+                <button onClick={() => continueSession(s)} style={{ ...btnPurple, fontSize:12, padding:"4px 12px" }}>Continue</button>
+                <button onClick={() => deleteSession(s.id)} style={{ ...btn, fontSize:12, padding:"4px 8px", color:"#e24b4a", borderColor:"#e24b4a" }}>x</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+
+  return (
+    <div>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8, gap:8 }}>
+        <button onClick={saveAndExit} style={{ ...btn, fontSize:13 }}>Save and exit</button>
+        <div style={{ fontSize:12, color:"var(--color-text-secondary)", textAlign:"center" }}>{selectedApp ? selectedApp.role + " @ " + selectedApp.company : "General"}</div>
+        <button onClick={getSummary} disabled={loading} style={{ ...btnPurple, fontSize:12, padding:"5px 12px" }}>Get summary</button>
+      </div>
+      <div style={{ fontSize:11, color:"#1d9e75", marginBottom:10, textAlign:"center" }}>Session auto-saved in this browser - you can safely leave and return</div>
+      <ChatLog messages={messages} loading={loading} chatRef={chatRef} maxH={460} label="Interview Coach" />
+      <div style={{ display:"flex", gap:8 }}>
+        <textarea value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }} rows={3} style={{ ...inp, flex:1, resize:"none" }} placeholder="Type your answer... (Enter to send, Shift+Enter for new line)" />
+        <button onClick={send} disabled={loading} style={{ ...btnPurple, alignSelf:"flex-end" }}>Send</button>
+      </div>
+    </div>
+  );
+}
+
+function getStreak(habit) {
+  let s = 0;
+  for (let i = 0; i < 365; i++) {
+    const d = new Date(); d.setDate(d.getDate() - i);
+    if (habit.completedDates.includes(dateStr(d))) s++;
+    else if (i > 0) break;
+  }
+  return s;
+}
+
+function AboutMeView({ state, onBack }) {
+  const [summary, setSummary] = useState("");
+  const [editing, setEditing] = useState(false);
+  const [editText, setEditText] = useState("");
+  const [loading, setLoading] = useState(false);
+  const buildPrompt = () => {
+    const habits = (state.habits || []).map(h => h.title + "(" + h.freq + ", streak:" + getStreak(h) + ", total:" + h.completedDates.length + ")").join("; ");
+    const tasks = (state.tasks || []).filter(t => !t.habitId);
+    const completed = tasks.filter(t => t.done).map(t => t.title + "(" + t.category + ")").join("; ");
+    const pending = tasks.filter(t => !t.done).map(t => t.title + "(" + t.category + "," + t.priority + (t.due ? ",due " + t.due : "") + ")").join("; ");
+    const apps = (state.applications || []).slice(0, 10).map(a => a.role + " at " + a.company + "(" + a.stage + ")").join("; ");
+    const contacts = (state.contacts || []).slice(0, 10).map(c => c.name + (c.company ? " @ " + c.company : "") + " - " + (c.category || "contact")).join("; ");
+    const achievements = (state.achievements || []).slice(0, 10).map(a => a.title + (a.category ? "(" + a.category + ")" : "") + ": " + (stripHtml(a.action) || "-") + " => " + (stripHtml(a.result) || "-")).join(" | ");
+    const missions = (state.missions || []).map(m => m.title + "(" + m.status + ")").join("; ");
+    const wins = (state.wins || []).slice(0, 5).map(w => w.text).join("; ");
+    const reflections = (state.reflections || []).slice(0, 3).map(r => r.text).join(" | ");
+    return "Based on all stored data, write a friendly accurate profile summary. Be specific. Do NOT invent. Use second person.\n\nName: " + (state.myName || "unknown") + "\nCV: " + (state.cv || "(No CV provided)").slice(0, 1000) + "\nWeekly goal: " + (state.weeklyGoal || "none") + "\nMissions: " + (missions || "none") + "\nHabits: " + (habits || "none") + "\nCompleted tasks: " + (completed || "none") + "\nPending tasks: " + (pending || "none") + "\nJob apps: " + (apps || "none") + "\nContacts: " + (contacts || "none") + "\nAchievements: " + (achievements || "none") + "\nWins: " + (wins || "none") + "\nReflections: " + (reflections || "none") + "\nEnergy: " + (state.checkIn?.energy || "unknown") + ", Mood: " + (state.checkIn?.mood || "unknown");
+  };
+  const generate = async () => {
+    setLoading(true); setSummary(""); setEditing(false);
+    try { setSummary(await callClaude({ max_tokens:1200, system:"You are a career coach summarising a person's profile. Be warm, specific and accurate. Plain text only.", messages:[{ role:"user", content:buildPrompt() }] })); }
+    catch (e) { setSummary(aiErrorText(e)); }
+    setLoading(false);
+  };
+  const lines = summary.split("\n").filter(l => l.trim());
+  return (
+    <div>
+      {onBack && <button onClick={onBack} style={{ ...btn, marginBottom:16, fontSize:13 }}>Back</button>}
+      <div style={{ fontSize:16, fontWeight:500, marginBottom:4 }}>What do you know about me?<AIBadge /></div>
+      <div style={{ fontSize:13, color:"var(--color-text-secondary)", marginBottom:16 }}>Generates a summary from everything stored - CV, habits, tasks, applications, wins, achievements and more.</div>
+      <NoKeyNotice />
+      <button onClick={generate} disabled={loading} style={{ ...btnPurple, marginBottom:16 }}>{loading ? "Analysing your data..." : "Generate my profile summary"}</button>
+      {summary && !editing && (
+        <div>
+          <div style={{ ...aiBoxStyle, lineHeight:1.9, marginBottom:12 }}>{summary}</div>
+          <div style={{ display:"flex", gap:8, marginBottom:16 }}>
+            <button onClick={() => { setEditText(summary); setEditing(true); }} style={{ ...btnPurple, fontSize:13 }}>Edit / trim</button>
+            <button onClick={generate} style={{ ...btn, fontSize:13 }}>Regenerate</button>
+          </div>
+          <div style={{ fontSize:12, fontWeight:500, color:"var(--color-text-secondary)", marginBottom:8 }}>Click a line to remove it:</div>
+          {lines.map((line, i) => (
+            <div key={i} onClick={() => setSummary(lines.filter((_, j) => j !== i).join("\n"))} style={{ fontSize:13, padding:"6px 10px", background:"var(--color-background-secondary)", borderRadius:6, marginBottom:4, cursor:"pointer", display:"flex", justifyContent:"space-between", gap:8 }}>
+              <span>{line}</span><span style={{ color:"#e24b4a", fontSize:12, flexShrink:0 }}>x</span>
+            </div>
+          ))}
+        </div>
+      )}
+      {summary && editing && (
+        <div>
+          <textarea value={editText} onChange={e => setEditText(e.target.value)} rows={16} style={{ ...inp, resize:"vertical", marginBottom:12, lineHeight:1.7 }} />
+          <div style={{ display:"flex", gap:8 }}>
+            <button onClick={() => { setSummary(editText); setEditing(false); }} style={{ ...btnP, flex:1 }}>Save</button>
+            <button onClick={() => setEditing(false)} style={{ ...btn, flex:1 }}>Cancel</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AICoachTab({ state, askAI, initialView }) {
+  const [coachView, setCoachView] = useState(initialView || "main");
+  const [liJobType, setLiJobType] = useState("");
+  const [salaryRole, setSalaryRole] = useState("");
+  const [salaryLocation, setSalaryLocation] = useState("");
+  const [salaryIndustry, setSalaryIndustry] = useState("");
+  const [resp, setResp] = useState("");
+  const [loading, setLoading] = useState(false);
+  const back = initialView ? null : () => { setCoachView("main"); setResp(""); };
+
+  const callAI = async prompt => {
+    setLoading(true); setResp("");
+    try { setResp(await callClaude({ max_tokens:1500, system:"You are a career coach and LinkedIn expert. Be specific, actionable, encouraging. Plain text, no markdown.", messages:[{ role:"user", content:prompt }] })); }
+    catch (e) { setResp(aiErrorText(e)); }
+    setLoading(false);
+  };
+  const reviewLiVsJobType = () => {
+    if (!liJobType.trim()) { setResp("Please enter a job type."); return; }
+    const saved = state.linkedInSections || {};
+    const all = LI_SECTIONS.map(s => saved[s] ? s + ":\n" + saved[s] : "").filter(Boolean).join("\n\n");
+    if (!all) { setResp("Please add LinkedIn sections via My CV first."); return; }
+    callAI("Review this LinkedIn profile against the job type: \"" + liJobType + "\".\n\nProfile:\n" + all + "\n\n1) Rate fit (out of 10). 2) What aligns well. 3) Key gaps. 4) Top 5 changes for \"" + liJobType + "\" roles.");
+  };
+  const searchSalary = () => {
+    if (!salaryRole.trim()) { setResp("Please enter a role title."); return; }
+    callAI("Salary info:\nRole: " + salaryRole + "\nLocation: " + (salaryLocation || "Australia") + "\nIndustry: " + (salaryIndustry || "general") + "\nCV:\n" + (state.cv || "(none)") + "\n\n1) Typical salary bands (entry/mid/senior). 2) Where this candidate fits. 3) Target range. 4) Negotiation tips. Use AUD if Australian. Say clearly that these are estimates from training data, not live market data, and point to Seek, PayScale or Glassdoor to verify.");
+  };
+  const aiBox = loading ? <div style={{ fontSize:13, color:"var(--color-text-secondary)", padding:"1rem 0" }}>Thinking...</div>
+    : resp ? <div style={{ ...aiBoxStyle, marginTop:16 }}>{resp}</div> : null;
+
+  if (coachView === "linkedin-review") return <LinkedInReviewChat savedSections={state.linkedInSections || {}} onBack={back} />;
+  if (coachView === "interview") return <InterviewPracticeChat state={state} onBack={back} />;
+  if (coachView === "about-me") return <AboutMeView state={state} onBack={back} />;
+  if (coachView === "linkedin-jobtype") return (
+    <div>
+      {back && <button onClick={back} style={{ ...btn, marginBottom:16, fontSize:13 }}>Back</button>}
+      <div style={{ fontSize:16, fontWeight:500, marginBottom:4 }}>Review profile vs job type<AIBadge /></div>
+      <div style={{ fontSize:13, color:"var(--color-text-secondary)", marginBottom:12 }}>Uses your saved LinkedIn sections from My CV automatically.</div>
+      <NoKeyNotice />
+      <div style={{ background:"var(--color-background-secondary)", borderRadius:8, padding:"10px 12px", marginBottom:16 }}>
+        {LI_SECTIONS.map(s => { const ok = (state.linkedInSections || {})[s]; return (
+          <div key={s} style={{ display:"flex", alignItems:"center", gap:8, marginBottom:4 }}>
+            <span style={{ fontSize:13, color:ok ? "#1d9e75" : "#ba7517" }}>{ok ? "✓" : "✗"}</span>
+            <span style={{ fontSize:13 }}>{s}</span>
+            {!ok && <span style={{ fontSize:11, color:"#ba7517" }}>Not saved - add via My CV</span>}
+          </div>
+        ); })}
+      </div>
+      <Field label="Job type"><input value={liJobType} onChange={e => setLiJobType(e.target.value)} style={inp} placeholder="e.g. Product Manager, Data Analyst..." /></Field>
+      <button onClick={reviewLiVsJobType} disabled={loading} style={{ ...btnPurple, width:"100%" }}>Analyse fit</button>
+      {aiBox}
+    </div>
+  );
+  if (coachView === "salary") return (
+    <div>
+      {back && <button onClick={back} style={{ ...btn, marginBottom:16, fontSize:13 }}>Back</button>}
+      <div style={{ fontSize:16, fontWeight:500, marginBottom:4 }}>Salary band search<AIBadge /></div>
+      <div style={{ fontSize:13, color:"var(--color-text-secondary)", marginBottom:12 }}>AI estimates only. The model has no live salary data, so check the Salary and Market Data links in Resources before negotiating.</div>
+      <NoKeyNotice />
+      {!state.cv && <div style={{ fontSize:12, color:"#ba7517", background:"#faeeda", borderRadius:8, padding:"8px 12px", marginBottom:12 }}>No CV saved - add via My CV for personalised results.</div>}
+      <Field label="Role title"><input value={salaryRole} onChange={e => setSalaryRole(e.target.value)} style={inp} placeholder="e.g. Product Manager..." /></Field>
+      <Field label="Location"><input value={salaryLocation} onChange={e => setSalaryLocation(e.target.value)} style={inp} placeholder="e.g. Melbourne, Sydney..." /></Field>
+      <Field label="Industry"><input value={salaryIndustry} onChange={e => setSalaryIndustry(e.target.value)} style={inp} placeholder="e.g. Technology, Finance..." /></Field>
+      <button onClick={searchSalary} disabled={loading} style={{ ...btnPurple, width:"100%" }}>Search salary bands</button>
+      {aiBox}
+    </div>
+  );
+
+  const grid = { display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(200px, 1fr))", gap:8, marginBottom:20 };
+  return (
+    <div>
+      <div style={{ fontSize:14, color:"var(--color-text-secondary)", marginBottom:16 }}>Your AI coach gives personalised guidance on productivity and career. Every button on this tab uses AI.</div>
+      <NoKeyNotice />
+      <div style={{ fontSize:13, fontWeight:500, color:"var(--color-text-secondary)", marginBottom:8 }}>Productivity</div>
+      <div style={grid}>
+        {[["Suggest today's best order","Look at my tasks and energy level. What order should I tackle things today?"],
+          ["Warn me of at-risk deadlines","Review my tasks with due dates. Which ones are at risk?"],
+          ["Skill development advice","When should I work on skill development this week?"],
+          ["Weekly summary","Summarise my wins, habits and job search activity this week."],
+        ].map(([label, prompt]) => <button key={label} onClick={() => askAI(prompt)} style={{ ...btn, textAlign:"left", padding:"10px 12px", fontSize:13, lineHeight:1.4 }}>{label}</button>)}
+      </div>
+      <div style={{ fontSize:13, fontWeight:500, color:"var(--color-text-secondary)", marginBottom:8 }}>LinkedIn and career</div>
+      <div style={grid}>
+        {[["Review my LinkedIn profile","linkedin-review"],["Profile vs job type","linkedin-jobtype"],["Salary band search","salary"],["Interview practice","interview"],["What do you know about me?","about-me"]]
+          .map(([label, v]) => <button key={label} onClick={() => { setCoachView(v); setResp(""); }} style={{ ...btnPurple, textAlign:"left", padding:"10px 12px", fontSize:13, lineHeight:1.4 }}>{label}</button>)}
+      </div>
+    </div>
+  );
+}
+
+/* =========================================================================
+   App
+   ========================================================================= */
+
+function App() {
+  const [state, setState] = useState(loadState);
+  const [activeStep, setActiveStep] = useState("reflect");
+  const [tab, setTab] = useState("Achievements");
+  const [stepChecks, setStepChecks] = useState(() => lsGet(CHECKS_KEY, {}));
+  const [stepCelebrate, setStepCelebrate] = useState(null);
+  const [showAdd, setShowAdd] = useState(false);
+  const [showAddHabit, setShowAddHabit] = useState(false);
+  const [showAddApp, setShowAddApp] = useState(false);
+  const [showAddContact, setShowAddContact] = useState(false);
+  const [showAddAchievement, setShowAddAchievement] = useState(false);
+  const [showAddResource, setShowAddResource] = useState(false);
+  const [showCvModal, setShowCvModal] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [showArchive, setShowArchive] = useState(false);
+  const [showImportExport, setShowImportExport] = useState(false);
+  const [importText, setImportText] = useState("");
+  const [importMsg, setImportMsg] = useState("");
+  const [copied, setCopied] = useState(false);
+  const [storageWarning, setStorageWarning] = useState("");
+  const [selectedAppId, setSelectedAppId] = useState(null);
+  const [selectedContactId, setSelectedContactId] = useState(null);
+  const [editingTask, setEditingTask] = useState(null);
+  const [editingHabit, setEditingHabit] = useState(null);
+  const [editingAchievement, setEditingAchievement] = useState(null);
+  const [editingResource, setEditingResource] = useState(null);
+  const [editingWin, setEditingWin] = useState(null);
+  const [resourceFilter, setResourceFilter] = useState("All");
+  const [aiResponse, setAiResponse] = useState("");
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiField, setAiField] = useState("");
+  const [pomActive, setPomActive] = useState(false);
+  const [pomSecs, setPomSecs] = useState(25 * 60);
+  const [pomMode, setPomMode] = useState("work");
+  const [celebrate, setCelebrate] = useState(false);
+  const [newTask, setNewTask] = useState(emptyTask);
+  const [newHabit, setNewHabit] = useState(emptyHabit);
+  const [newApp, setNewApp] = useState(emptyApp);
+  const [newContact, setNewContact] = useState(emptyContact);
+  const [newAchievement, setNewAchievement] = useState(emptyAchievement);
+  const [newResource, setNewResource] = useState(emptyResource);
+  const [win, setWin] = useState("");
+  const [reflection, setReflection] = useState("");
+  const [energy, setEnergy] = useState(3);
+  const [mood, setMood] = useState(3);
+  const [weeklyGoalInput, setWeeklyGoalInput] = useState(() => loadState().weeklyGoal || "");
+  const [today, setToday] = useState(todayStr);
+
+  // Keep "today" correct if the tab is left open past midnight.
+  useEffect(() => { const id = setInterval(() => setToday(t => { const n = todayStr(); return n !== t ? n : t; }), 60000); return () => clearInterval(id); }, []);
+
+  // save() accepts an object or an updater function. The updater form is used after
+  // async AI calls so that edits made while waiting are not overwritten.
+  const save = nextOrFn => setState(prev => {
+    const next = typeof nextOrFn === "function" ? nextOrFn(prev) : nextOrFn;
+    if (!lsSet(STATE_KEY, next)) setStorageWarning("Could not save to browser storage (it may be full or blocked). Export your data now.");
+    return next;
+  });
+  const saveChecks = next => { setStepChecks(next); lsSet(CHECKS_KEY, next); };
+  const flash = () => { setCelebrate(true); setTimeout(() => setCelebrate(false), 2200); };
+
+  const selectedApp = state.applications.find(a => a.id === selectedAppId) || null;
+  const selectedContact = state.contacts.find(c => c.id === selectedContactId) || null;
+  const currentStep = STEPS.find(s => s.id === activeStep);
+  const handleStepChange = id => { setActiveStep(id); setTab(SUB_TABS[id][0]); setAiResponse(""); };
+  const stepProgress = step => ({ done:step.checks.filter((_, i) => stepChecks[step.id + "_" + i]).length, total:step.checks.length });
+
+  const toggleCheck = (stepId, idx) => {
+    const key = stepId + "_" + idx;
+    const next = { ...stepChecks, [key]:!stepChecks[key] };
+    saveChecks(next);
+    const step = STEPS.find(s => s.id === stepId);
+    if (!stepChecks[key] && step.checks.every((_, i) => next[stepId + "_" + i])) { setStepCelebrate(stepId); setTimeout(() => setStepCelebrate(null), 4000); }
+  };
+
+  const syncHabitTasks = s => {
+    const t = todayStr(); const dow = new Date().getDay();
+    let tasks = [...s.tasks];
+    (s.habits || []).forEach(h => {
+      const applies = h.freq === "daily" || (h.freq === "weekdays" && dow >= 1 && dow <= 5) || (h.freq === "weekly" && dow === 1);
+      if (!applies || tasks.some(x => x.habitId === h.id && x.due === t)) return;
+      tasks.push({ id:uid(), title:"[Habit] " + h.title, desc:"Habit", duration:15, due:t, priority:"Medium", category:"Focus", deps:[], done:h.completedDates.includes(t), created:Date.now(), habitId:h.id });
+    });
+    return { ...s, tasks };
+  };
+  useEffect(() => { save(prev => { const synced = syncHabitTasks(prev); return synced.tasks.length !== prev.tasks.length ? synced : prev; }); }, [state.habits.length, today]);
+
+  // Pomodoro based on an end timestamp, so it stays accurate when the tab is in the background.
+  const pomEnd = useRef(null);
+  useEffect(() => {
+    if (!pomActive) return;
+    pomEnd.current = Date.now() + pomSecs * 1000;
+    const id = setInterval(() => {
+      const left = Math.max(0, Math.round((pomEnd.current - Date.now()) / 1000));
+      setPomSecs(left);
+      if (left === 0) {
+        clearInterval(id); setPomActive(false);
+        setPomMode(m => { const n = m === "work" ? "break" : "work"; setPomSecs(n === "break" ? 5 * 60 : 25 * 60); return n; });
+        try { new Audio("data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=").play(); } catch {}
+      }
+    }, 500);
+    return () => clearInterval(id);
+  }, [pomActive]);
+  const fmt = s => pad(Math.floor(s / 60)) + ":" + pad(s % 60);
+
+  // ---- Tasks
+  const toggleTask = id => {
+    const task = state.tasks.find(t => t.id === id); if (!task) return;
+    const habits = !task.habitId ? state.habits : state.habits.map(h => h.id !== task.habitId ? h : { ...h, completedDates:h.completedDates.includes(today) ? h.completedDates.filter(d => d !== today) : [...h.completedDates, today] });
+    save({ ...state, tasks:state.tasks.map(t => t.id === id ? { ...t, done:!t.done } : t), habits });
+    if (!task.done) { flash(); setTimeout(() => save(prev => ({ ...prev, tasks:prev.tasks.map(t => t.id === id && t.done ? { ...t, archived:true } : t) })), 2500); }
+  };
+  const addTask = () => { if (!newTask.title.trim()) return; save({ ...state, tasks:[...state.tasks, { ...newTask, id:uid(), done:false, created:Date.now() }] }); setNewTask(emptyTask); setShowAdd(false); };
+  const deleteTask = id => save({ ...state, tasks:state.tasks.filter(t => t.id !== id) });
+  const restoreTask = id => save({ ...state, tasks:state.tasks.map(t => t.id === id ? { ...t, archived:false, done:false } : t) });
+  const saveTaskEdit = () => { save({ ...state, tasks:state.tasks.map(t => t.id === editingTask.id ? editingTask : t) }); setEditingTask(null); };
+  const autoScheduled = () => {
+    const tasks = state.tasks.filter(t => !t.archived).sort((a, b) => {
+      const pd = PRIORITIES.indexOf(a.priority) - PRIORITIES.indexOf(b.priority); if (pd) return pd;
+      if (a.due && b.due) return a.due.localeCompare(b.due);
+      return a.due ? -1 : b.due ? 1 : 0;
+    });
+    const all = state.tasks;
+    return tasks.map(t => ({ ...t, blocked:(t.deps || []).some(d => { const dep = all.find(x => x.id === d || x.title === d); return dep && !dep.done; }) }));
+  };
+
+  // ---- Habits
+  const addHabit = () => { if (!newHabit.title.trim()) return; save(syncHabitTasks({ ...state, habits:[...state.habits, { ...newHabit, id:uid(), completedDates:[] }] })); setNewHabit(emptyHabit); setShowAddHabit(false); };
+  const toggleHabit = id => {
+    const habit = state.habits.find(h => h.id === id); if (!habit) return;
+    const already = habit.completedDates.includes(today);
+    save({ ...state,
+      habits:state.habits.map(h => h.id === id ? { ...h, completedDates:already ? h.completedDates.filter(d => d !== today) : [...h.completedDates, today] } : h),
+      tasks:state.tasks.map(t => t.habitId === id && t.due === today ? { ...t, done:!already } : t) });
+    if (!already) flash();
+  };
+  const saveHabitEdit = () => { save({ ...state, habits:state.habits.map(h => h.id === editingHabit.id ? editingHabit : h) }); setEditingHabit(null); };
+  const deleteHabit = id => { if (!confirm("Delete this habit and its history?")) return; save({ ...state, habits:state.habits.filter(h => h.id !== id), tasks:state.tasks.filter(t => t.habitId !== id) }); setEditingHabit(null); };
+
+  // ---- Applications / contacts
+  const addApp = () => { if (!newApp.company.trim()) return; save({ ...state, applications:[...state.applications, { ...newApp, id:uid() }] }); setNewApp(emptyApp); setShowAddApp(false); };
+  const updateAppField = (id, field, value) => save(prev => ({ ...prev, applications:prev.applications.map(a => a.id === id ? { ...a, [field]:value } : a) }));
+  const deleteApp = id => { if (!confirm("Delete this application?")) return; save({ ...state, applications:state.applications.filter(a => a.id !== id) }); setSelectedAppId(null); };
+  const addContact = () => { if (!newContact.name.trim()) return; save({ ...state, contacts:[...state.contacts, { ...newContact, id:uid() }] }); setNewContact(emptyContact); setShowAddContact(false); };
+  const updateContactField = (id, field, value) => save(prev => ({ ...prev, contacts:prev.contacts.map(c => c.id === id ? { ...c, [field]:value } : c) }));
+  const deleteContact = id => { if (!confirm("Delete this contact?")) return; save({ ...state, contacts:state.contacts.filter(c => c.id !== id) }); setSelectedContactId(null); };
+
+  // ---- Achievements / resources
+  const addAchievement = () => { if (!newAchievement.title.trim()) return; save({ ...state, achievements:[...(state.achievements || []), { ...newAchievement, id:uid(), created:Date.now() }] }); setNewAchievement(emptyAchievement); setShowAddAchievement(false); };
+  const saveAchievementEdit = () => { save({ ...state, achievements:state.achievements.map(a => a.id === editingAchievement.id ? editingAchievement : a) }); setEditingAchievement(null); };
+  const deleteAchievement = id => { if (confirm("Delete this achievement?")) save({ ...state, achievements:state.achievements.filter(a => a.id !== id) }); };
+  const addResource = () => { if (!newResource.title.trim()) return; save({ ...state, resources:[...(state.resources || []), { ...newResource, id:uid(), created:Date.now() }] }); setNewResource(emptyResource); setShowAddResource(false); };
+  const saveResourceEdit = () => { save({ ...state, resources:state.resources.map(r => r.id === editingResource.id ? editingResource : r) }); setEditingResource(null); };
+  const deleteResource = id => save({ ...state, resources:state.resources.filter(r => r.id !== id) });
+  const resourceCategories = ["All", ...new Set((state.resources || []).map(r => r.category).filter(Boolean))];
+
+  // ---- Weekly
+  const saveCheckIn = () => save({ ...state, checkIn:{ energy, mood, date:today } });
+  const addWin = () => { if (!win.trim()) return; save({ ...state, wins:[{ text:win, date:today, id:uid() }, ...state.wins] }); setWin(""); flash(); };
+  const saveWinEdit = () => { save({ ...state, wins:state.wins.map(w => w.id === editingWin.id ? editingWin : w) }); setEditingWin(null); };
+  const toggleWinArchive = id => save({ ...state, wins:state.wins.map(w => w.id === id ? { ...w, archived:!w.archived } : w) });
+  const deleteWin = id => save({ ...state, wins:state.wins.filter(w => w.id !== id) });
+  const saveReflection = () => { if (!reflection.trim()) return; save({ ...state, reflections:[{ text:reflection, date:today, id:uid() }, ...state.reflections] }); setReflection(""); };
+
+  // ---- Import / export (file download added; the API key is never exported)
+  const exportJson = () => JSON.stringify({ ...state, _checks:stepChecks, _exported:new Date().toISOString() }, null, 2);
+  const downloadExport = () => {
+    const blob = new Blob([exportJson()], { type:"application/json" });
+    const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "productivity-tracker-" + today + ".json"; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  };
+  const applyImport = text => {
+    try {
+      const parsed = JSON.parse(text);
+      if (typeof parsed !== "object" || !parsed || Array.isArray(parsed)) throw new Error();
+      const { _checks, _exported, ...rest } = parsed;
+      if (!confirm("Replace ALL current data with the imported file?")) return;
+      save({ ...defaultState, ...rest }); if (_checks) saveChecks(_checks);
+      setWeeklyGoalInput(rest.weeklyGoal || ""); setImportText(""); setImportMsg("Imported."); setShowImportExport(false);
+    } catch { setImportMsg("Invalid file - paste or choose a file exported from this tracker."); }
+  };
+  const importFile = e => { const f = e.target.files?.[0]; if (!f) return; f.text().then(applyImport); e.target.value = ""; };
+
+  // ---- AI (general coach + per-application generation)
+  const askAI = async (prompt, targetField, appId) => {
+    setAiLoading(true); setAiField(targetField || ""); setAiResponse("");
+    try {
+      const ctx = JSON.stringify({ today, name:state.myName, tasks:state.tasks.filter(t => !t.archived).slice(0, 20).map(({ title, priority, due, done, category }) => ({ title, priority, due, done, category })), habits:state.habits.map(h => ({ title:h.title, freq:h.freq, streak:getStreak(h) })), missions:state.missions, applications:state.applications.slice(0, 10).map(({ company, role, stage, date }) => ({ company, role, stage, date })), wins:state.wins.slice(0, 5), checkIn:state.checkIn, weeklyGoal:state.weeklyGoal, cvExcerpt:(state.cv || "").slice(0, 1500) });
+      const text = await callClaude({ max_tokens:targetField === "resume" || targetField === "coverLetter" ? 2500 : 1000, system:"You are a supportive productivity and career coach. Concise, warm, actionable. Plain text, no markdown.", messages:[{ role:"user", content:"Context: " + ctx + "\n\n" + prompt }] });
+      setAiResponse(text);
+      if (targetField && appId) updateAppField(appId, targetField, textToHtml(text));
+    } catch (e) { setAiResponse(aiErrorText(e)); setAiField(""); }
+    setAiLoading(false);
+  };
+  const askAppAI = type => {
+    if (!selectedApp) return;
+    const cv = state.cv || "(No CV provided)";
+    const jd = "Job: " + selectedApp.role + " at " + selectedApp.company + ". JD: " + (stripHtml(selectedApp.jdNotes) || "none") + ".";
+    const map = { evaluate:["Evaluate fit, strengths, gaps, and recommend whether to apply.","evaluation"], resume:["Generate a tailored resume. Use only facts in the CV; do not invent experience.","resume"], cover:["Write a compelling cover letter. Use only facts in the CV.","coverLetter"] };
+    const [instr, field] = map[type];
+    if (selectedApp[field] && stripHtml(selectedApp[field]) && !confirm("This will replace the current " + field + " text. Continue?")) return;
+    askAI(jd + "\nCV:\n" + cv + "\n" + instr, field, selectedApp.id);
+  };
+
+  const completedToday = state.tasks.filter(t => t.done && !t.habitId && (t.due === today || !t.due)).length;
+  const habitsToday = state.habits.filter(h => h.completedDates.includes(today)).length;
+  const appsThisWeek = state.applications.filter(a => a.date && daysBetween(a.date, today) >= 0 && daysBetween(a.date, today) < 7).length;
+  const card = { background:"var(--color-background-primary)", border:"0.5px solid var(--color-border-tertiary)", borderRadius:8, padding:"10px 12px", marginBottom:8 };
+
+  return (
+    <div style={{ fontFamily:"var(--font-sans)", color:"var(--color-text-primary)", maxWidth:760, margin:"0 auto", padding:"1rem 16px 3rem" }}>
+      {celebrate && <div style={{ position:"fixed", inset:0, pointerEvents:"none", zIndex:999, display:"flex", alignItems:"center", justifyContent:"center" }}><div style={{ fontSize:64, animation:"popIn 0.4s ease" }}>🎉</div></div>}
+
+      {stepCelebrate && (() => {
+        const s = STEPS.find(x => x.id === stepCelebrate);
+        const next = STEPS[STEPS.findIndex(x => x.id === stepCelebrate) + 1];
+        return (
+          <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.55)", zIndex:998, display:"flex", alignItems:"center", justifyContent:"center", padding:16 }} onClick={() => setStepCelebrate(null)}>
+            <div style={{ background:s.bg, border:"2px solid " + s.color, borderRadius:24, padding:"2rem", textAlign:"center", maxWidth:360, animation:"stepPop 0.5s ease" }}>
+              <div style={{ fontSize:56, marginBottom:12 }}>🎉</div>
+              <div style={{ fontSize:22, fontWeight:500, color:s.text, marginBottom:8 }}>{s.emoji} {s.label} complete!</div>
+              <div style={{ fontSize:14, color:s.text, opacity:0.85, marginBottom:16 }}>You have ticked off every action in this step. Keep going!</div>
+              {next ? <button onClick={() => { setStepCelebrate(null); handleStepChange(next.id); }} style={{ ...btn, padding:"10px 20px", background:next.color, color:"#fff", border:"none" }}>Next: {next.emoji} {next.label}</button>
+                : <div style={{ fontSize:14, color:s.text, fontWeight:500 }}>You have completed all 6 steps! 🚀</div>}
+            </div>
+          </div>
+        );
+      })()}
+
+      <div style={{ marginBottom:"1rem", display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:12, flexWrap:"wrap" }}>
+        <div>
+          <div style={{ fontSize:22, fontWeight:500, marginBottom:4 }}>{state.myName ? state.myName + "'s" : "My"} Productivity Tracker</div>
+          <div style={{ fontSize:13, color:"var(--color-text-secondary)" }}>{new Date().toLocaleDateString("en-AU", { weekday:"long", year:"numeric", month:"long", day:"numeric" })}</div>
+        </div>
+        <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+          <button onClick={() => setShowImportExport(true)} style={{ ...btnPurple, fontSize:12, padding:"6px 12px" }}>Import / Export</button>
+          <button onClick={() => setShowCvModal(true)} style={{ ...btnPurple, fontSize:12, padding:"6px 12px" }}>My CV</button>
+          <button onClick={() => setShowSettings(true)} style={{ ...btnPurple, fontSize:12, padding:"6px 12px" }}>Settings {hasApiKey() ? "· AI on" : "· AI off"}</button>
+        </div>
+      </div>
+
+      {storageWarning && <div style={{ fontSize:13, color:"#993c1d", background:"#faece7", borderRadius:8, padding:"8px 12px", marginBottom:12 }}>{storageWarning}</div>}
+
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(140px, 1fr))", gap:8, marginBottom:"1rem" }}>
+        {[{ label:"Tasks done today", val:completedToday },
+          { label:"Habits today", val:habitsToday + "/" + state.habits.length },
+          { label:"Apps last 7 days", val:appsThisWeek + "/" + state.weeklyTargetApps },
+          { label:"Energy", val:state.checkIn?.date === today ? "⚡".repeat(state.checkIn.energy) : "-" },
+        ].map(c => (
+          <div key={c.label} style={{ background:"var(--color-background-secondary)", borderRadius:8, padding:"10px 12px" }}>
+            <div style={{ fontSize:12, color:"var(--color-text-secondary)", marginBottom:4 }}>{c.label}</div>
+            <div style={{ fontSize:18, fontWeight:500 }}>{c.val}</div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ display:"flex", gap:4, marginBottom:12, flexWrap:"wrap" }}>
+        {STEPS.map(s => {
+          const prog = stepProgress(s); const active = activeStep === s.id;
+          return (
+            <button key={s.id} onClick={() => handleStepChange(s.id)} style={{ ...btn, padding:"6px 12px", fontSize:13, background:active ? s.color : s.bg, color:active ? "#fff" : s.text, border:"0.5px solid " + (active ? s.color : s.bg), fontWeight:active ? 500 : 400, display:"flex", flexDirection:"column", alignItems:"center", gap:2, minWidth:80, flex:"1 1 80px" }}>
+              <span>{s.emoji} {s.label}</span>
+              <span style={{ fontSize:10, opacity:0.8 }}>{prog.done}/{prog.total}</span>
+            </button>
+          );
+        })}
+      </div>
+
+      <div style={{ background:currentStep.bg, border:"0.5px solid " + currentStep.color + "22", borderRadius:12, padding:"12px 16px", marginBottom:12 }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:12, flexWrap:"wrap" }}>
+          <div style={{ flex:"1 1 260px" }}>
+            <div style={{ fontSize:15, fontWeight:500, color:currentStep.text, marginBottom:2 }}>{currentStep.emoji} {currentStep.label}</div>
+            <div style={{ fontSize:13, color:currentStep.text, opacity:0.8, marginBottom:10 }}>{currentStep.tagline}</div>
+            <div style={{ display:"flex", flexDirection:"column", gap:4 }}>
+              {currentStep.checks.map((check, i) => {
+                const done = stepChecks[currentStep.id + "_" + i];
+                return (
+                  <label key={i} style={{ display:"flex", alignItems:"center", gap:8, cursor:"pointer", fontSize:13, color:currentStep.text, opacity:done ? 0.6 : 1 }}>
+                    <input type="checkbox" checked={!!done} onChange={() => toggleCheck(currentStep.id, i)} />
+                    <span style={{ textDecoration:done ? "line-through" : "none" }}>{check}</span>
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+          <details style={{ flex:"0 1 220px" }}>
+            <summary style={{ fontSize:12, color:currentStep.text, cursor:"pointer", marginBottom:6, opacity:0.8 }}>Tips and AI prompts</summary>
+            <div style={{ fontSize:12, color:currentStep.text, opacity:0.85 }}>
+              {currentStep.tips.map((t, i) => <div key={i} style={{ marginBottom:6 }}>- {t}</div>)}
+              <div style={{ marginTop:8, borderTop:"0.5px solid " + currentStep.color + "33", paddingTop:8 }}>
+                {currentStep.aiPrompts.map(([label, prompt]) => (
+                  <button key={label} onClick={() => askAI(prompt)} style={{ ...btn, fontSize:11, padding:"3px 8px", marginBottom:4, width:"100%", textAlign:"left", color:currentStep.text, borderColor:currentStep.color + "44" }}>{label}<AIBadge /></button>
+                ))}
+              </div>
+            </div>
+          </details>
+        </div>
+        {(() => { const p = stepProgress(currentStep); return (
+          <div style={{ marginTop:10 }}>
+            <div style={{ display:"flex", justifyContent:"space-between", fontSize:11, color:currentStep.text, opacity:0.7, marginBottom:4 }}><span>Step progress</span><span>{p.done}/{p.total}</span></div>
+            <div style={{ height:4, background:currentStep.color + "22", borderRadius:2 }}><div style={{ height:4, background:currentStep.color, borderRadius:2, width:(p.done / p.total * 100) + "%", transition:"width 0.3s" }} /></div>
+          </div>
+        ); })()}
+      </div>
+
+      {/* Fixed: general AI answers now show here; in the original they only showed inside the AI Coach tab, so step prompts looked like they did nothing. */}
+      {aiField === "" && (aiLoading || aiResponse) && (
+        <div style={{ ...aiBoxStyle, marginBottom:12, position:"relative" }}>
+          {aiLoading ? "Thinking..." : aiResponse}
+          {!aiLoading && <button onClick={() => setAiResponse("")} style={{ ...btn, position:"absolute", top:6, right:6, padding:"2px 8px", fontSize:11, color:"#0c447c", borderColor:"#b5d4f4" }}>Dismiss</button>}
+        </div>
+      )}
+
+      <div style={{ display:"flex", gap:6, marginBottom:"1.5rem", flexWrap:"wrap" }}>
+        {SUB_TABS[activeStep].map(t => {
+          const active = tab === t; const c = currentStep;
+          return <button key={t} onClick={() => setTab(t)} style={{ ...btn, background:active ? c.color : c.bg, color:active ? "#fff" : c.text, border:"0.5px solid " + (active ? c.color : c.bg), fontWeight:active ? 500 : 400, fontSize:13 }}>{t}{isAiTab(t) && !hasApiKey() ? " 🔒" : ""}</button>;
+        })}
+      </div>
+
+      {tab === "Today" && (
+        <div>
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(240px, 1fr))", gap:12, marginBottom:"1rem" }}>
+            <div style={{ ...card, borderRadius:12, padding:"1rem", marginBottom:0 }}>
+              <div style={{ fontSize:14, fontWeight:500, marginBottom:12 }}>Morning check-in</div>
+              <div style={{ fontSize:13, color:"var(--color-text-secondary)", marginBottom:6 }}>Energy: {energy}/5</div>
+              <input type="range" min={1} max={5} value={energy} onChange={e => setEnergy(+e.target.value)} style={{ width:"100%", marginBottom:10 }} />
+              <div style={{ fontSize:13, color:"var(--color-text-secondary)", marginBottom:6 }}>Mood: {mood}/5</div>
+              <input type="range" min={1} max={5} value={mood} onChange={e => setMood(+e.target.value)} style={{ width:"100%", marginBottom:10 }} />
+              <button onClick={saveCheckIn} style={{ ...btnP, width:"100%" }}>{state.checkIn?.date === today ? "Update check-in" : "Save check-in"}</button>
+            </div>
+            <div style={{ ...card, borderRadius:12, padding:"1rem", marginBottom:0 }}>
+              <div style={{ fontSize:14, fontWeight:500, marginBottom:8 }}>Pomodoro timer</div>
+              <div style={{ fontSize:36, fontWeight:500, textAlign:"center", marginBottom:8, fontVariantNumeric:"tabular-nums" }}>{fmt(pomSecs)}</div>
+              <div style={{ fontSize:12, color:"var(--color-text-secondary)", textAlign:"center", marginBottom:10 }}>{pomMode === "work" ? "Focus session" : "Break time"}</div>
+              <div style={{ display:"flex", gap:8 }}>
+                <button onClick={() => setPomActive(a => !a)} style={{ ...btnP, flex:1 }}>{pomActive ? "Pause" : "Start"}</button>
+                <button onClick={() => { setPomActive(false); setPomSecs(25 * 60); setPomMode("work"); }} style={{ ...btn, flex:1 }}>Reset</button>
+              </div>
+            </div>
+          </div>
+          <div style={{ marginBottom:8, display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+            <div style={{ fontSize:15, fontWeight:500 }}>Today's schedule</div>
+            <div style={{ display:"flex", gap:8 }}>
+              <button onClick={() => setShowArchive(true)} style={{ ...btn, fontSize:12, padding:"4px 10px", color:"var(--color-text-secondary)" }}>Archive</button>
+              <button onClick={() => setShowAdd(true)} style={btnP}>+ Add task</button>
+            </div>
+          </div>
+          <div style={{ fontSize:12, color:"var(--color-text-secondary)", marginBottom:10 }}>Sorted automatically by priority, then due date. Tasks waiting on unfinished dependencies are dimmed.</div>
+          {autoScheduled().length === 0 && <div style={{ fontSize:14, color:"var(--color-text-secondary)", padding:"1rem 0" }}>No tasks yet. Add your first task!</div>}
+          {autoScheduled().map(t => (
+            <div key={t.id} style={{ ...card, borderLeft:"3px solid " + priorityColor[t.priority], opacity:t.blocked ? 0.5 : 1 }}>
+              <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                <input type="checkbox" checked={t.done} onChange={() => toggleTask(t.id)} />
+                <div style={{ flex:1, minWidth:0 }}>
+                  <div style={{ fontSize:14, fontWeight:500, textDecoration:t.done ? "line-through" : "none", color:t.done ? "var(--color-text-tertiary)" : "var(--color-text-primary)" }}>{t.title}</div>
+                  <div style={{ display:"flex", gap:6, marginTop:4, flexWrap:"wrap" }}>
+                    <span style={{ fontSize:11, background:"var(--color-background-secondary)", borderRadius:4, padding:"2px 6px", color:categoryColor[t.category] }}>{t.category}</span>
+                    <span style={{ fontSize:11, color:"var(--color-text-secondary)" }}>{t.duration}min</span>
+                    {t.due && <span style={{ fontSize:11, color:t.due < today && !t.done ? "#e24b4a" : "var(--color-text-secondary)" }}>Due: {t.due}</span>}
+                    {t.blocked && <span style={{ fontSize:11, color:"#e24b4a" }}>Blocked</span>}
+                    {t.habitId && <span style={{ fontSize:11, color:"#1d9e75" }}>Habit</span>}
+                  </div>
+                </div>
+                {!t.habitId && <button onClick={() => deleteTask(t.id)} style={{ ...btn, padding:"4px 8px", fontSize:12, color:"var(--color-text-tertiary)" }}>x</button>}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {tab === "Tasks" && (
+        <div>
+          <div style={{ marginBottom:12, display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+            <div style={{ fontSize:15, fontWeight:500 }}>All tasks</div>
+            <div style={{ display:"flex", gap:8 }}>
+              <button onClick={() => setShowArchive(true)} style={{ ...btn, fontSize:12, padding:"4px 10px", color:"var(--color-text-secondary)" }}>Archive</button>
+              <button onClick={() => setShowAdd(true)} style={btnP}>+ Add task</button>
+            </div>
+          </div>
+          {state.tasks.filter(t => !t.habitId && !t.archived).length === 0 && <div style={{ fontSize:14, color:"var(--color-text-secondary)", padding:"1rem 0" }}>No open tasks.</div>}
+          {state.tasks.filter(t => !t.habitId && !t.archived).map(t => (
+            <div key={t.id} style={{ ...card, borderLeft:"3px solid " + priorityColor[t.priority] }}>
+              <div style={{ display:"flex", alignItems:"flex-start", gap:8 }}>
+                <input type="checkbox" checked={t.done} onChange={() => toggleTask(t.id)} style={{ marginTop:3 }} />
+                <div style={{ flex:1, minWidth:0 }}>
+                  <div style={{ fontSize:14, fontWeight:500, textDecoration:t.done ? "line-through" : "none" }}>{t.title}</div>
+                  {t.desc && <div style={{ fontSize:13, color:"var(--color-text-secondary)", marginTop:2 }}>{t.desc}</div>}
+                  <div style={{ display:"flex", gap:6, marginTop:6, flexWrap:"wrap" }}>
+                    <span style={{ fontSize:11, background:"var(--color-background-secondary)", borderRadius:4, padding:"2px 6px" }}>{t.category}</span>
+                    <span style={{ fontSize:11, background:"var(--color-background-secondary)", borderRadius:4, padding:"2px 6px", color:priorityColor[t.priority] }}>{t.priority}</span>
+                    <span style={{ fontSize:11, color:"var(--color-text-secondary)" }}>{t.duration}min</span>
+                    {t.due && <span style={{ fontSize:11, color:"var(--color-text-secondary)" }}>{t.due}</span>}
+                  </div>
+                </div>
+                <button onClick={() => setEditingTask({ ...t })} style={{ ...btn, padding:"4px 8px", fontSize:12 }}>Edit</button>
+                <button onClick={() => deleteTask(t.id)} style={{ ...btn, padding:"4px 8px", fontSize:12, color:"var(--color-text-tertiary)" }}>x</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {tab === "Job Apps" && (!selectedApp ? (
+        <div>
+          <div style={{ marginBottom:12, display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+            <div style={{ fontSize:15, fontWeight:500 }}>Job applications</div>
+            <button onClick={() => setShowAddApp(true)} style={btnP}>+ Add application</button>
+          </div>
+          {state.applications.length === 0 && <div style={{ fontSize:14, color:"var(--color-text-secondary)", padding:"1rem 0" }}>No applications yet.</div>}
+          {PIPELINE_STAGES.map(stage => {
+            const apps = state.applications.filter(a => a.stage === stage);
+            if (!apps.length) return null;
+            return (
+              <div key={stage} style={{ marginBottom:16 }}>
+                <div style={{ fontSize:13, fontWeight:500, color:"var(--color-text-secondary)", marginBottom:6, display:"flex", alignItems:"center", gap:6 }}>
+                  <span>{stage}</span><span style={{ fontSize:11, background:"var(--color-background-secondary)", borderRadius:10, padding:"2px 8px" }}>{apps.length}</span>
+                </div>
+                {apps.map(a => (
+                  <div key={a.id} onClick={() => setSelectedAppId(a.id)} style={{ ...card, cursor:"pointer", marginBottom:6 }}>
+                    <div style={{ fontSize:14, fontWeight:500 }}>{a.role || "(role)"} @ {a.company}</div>
+                    {a.date && <div style={{ fontSize:11, color:"var(--color-text-tertiary)", marginTop:2 }}>Applied {a.date}{a.date && ["Applied"].includes(a.stage) && daysBetween(a.date, today) >= 5 ? " - consider following up" : ""}</div>}
+                    {a.notes && <div style={{ fontSize:12, color:"var(--color-text-secondary)", marginTop:2 }}>{stripHtml(a.notes).slice(0, 120)}</div>}
+                  </div>
+                ))}
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <div>
+          <button onClick={() => setSelectedAppId(null)} style={{ ...btn, marginBottom:16, fontSize:13 }}>Back</button>
+          <div style={{ fontSize:18, fontWeight:500, marginBottom:8 }}>{selectedApp.role} @ {selectedApp.company}</div>
+          <div style={{ display:"flex", gap:6, flexWrap:"wrap", marginBottom:16 }}>
+            {PIPELINE_STAGES.map(s => <button key={s} onClick={() => updateAppField(selectedApp.id, "stage", s)} style={{ ...btn, fontSize:11, padding:"3px 10px", background:selectedApp.stage === s ? "#7f77dd" : "transparent", color:selectedApp.stage === s ? "#fff" : "var(--color-text-secondary)", border:"0.5px solid " + (selectedApp.stage === s ? "#7f77dd" : "var(--color-border-tertiary)") }}>{s}</button>)}
+          </div>
+          <Field label="Date applied"><input type="date" value={selectedApp.date || ""} onChange={e => updateAppField(selectedApp.id, "date", e.target.value)} style={inp} /></Field>
+          <div style={{ fontSize:14, fontWeight:500, marginBottom:10, marginTop:8 }}>Job description</div>
+          <Field label="JD link"><input value={selectedApp.jdLink || ""} onChange={e => updateAppField(selectedApp.id, "jdLink", e.target.value)} style={inp} placeholder="https://..." /></Field>
+          {selectedApp.jdLink && /^https?:\/\//.test(selectedApp.jdLink) && <a href={selectedApp.jdLink} target="_blank" rel="noopener noreferrer" style={{ fontSize:12, color:"#185fa5", display:"inline-block", marginBottom:10 }}>Open job ad</a>}
+          <Field label="JD notes (paste the job ad text here; AI reads this, it cannot open the link)"><RichTextarea value={selectedApp.jdNotes || ""} onChange={v => updateAppField(selectedApp.id, "jdNotes", v)} rows={3} placeholder="Key requirements, skills..." /></Field>
+          <div style={{ borderTop:"0.5px solid var(--color-border-tertiary)", paddingTop:16, marginBottom:16, marginTop:8 }}>
+            <div style={{ fontSize:14, fontWeight:500, marginBottom:10 }}>AI generation<AIBadge /></div>
+            <NoKeyNotice />
+            {!state.cv && <div style={{ fontSize:12, color:"#ba7517", marginBottom:10 }}>No CV added - click My CV to add yours.</div>}
+            <div style={{ display:"flex", gap:8, flexWrap:"wrap", marginBottom:12 }}>
+              <button onClick={() => askAppAI("evaluate")} disabled={aiLoading} style={{ ...btnPurple, fontSize:13 }}>Evaluate role</button>
+              <button onClick={() => askAppAI("resume")} disabled={aiLoading} style={{ ...btnPurple, fontSize:13 }}>Generate resume</button>
+              <button onClick={() => askAppAI("cover")} disabled={aiLoading} style={{ ...btnPurple, fontSize:13 }}>Generate cover letter</button>
+            </div>
+            {aiLoading && aiField !== "" && <div style={{ fontSize:13, color:"var(--color-text-secondary)" }}>Generating... the result will appear in the matching field below.</div>}
+          </div>
+          <Field label="Role evaluation"><RichTextarea value={selectedApp.evaluation || ""} onChange={v => updateAppField(selectedApp.id, "evaluation", v)} rows={5} placeholder="AI-generated or your own evaluation..." /></Field>
+          <Field label="Job evaluation results"><RichTextarea value={selectedApp.evaluationResults || ""} onChange={v => updateAppField(selectedApp.id, "evaluationResults", v)} rows={4} placeholder="Outcome - fit score, strengths, gaps..." /></Field>
+          <Field label="Resume"><RichTextarea value={selectedApp.resume || ""} onChange={v => updateAppField(selectedApp.id, "resume", v)} rows={8} placeholder="AI-generated or customised resume..." /></Field>
+          <Field label="Cover letter"><RichTextarea value={selectedApp.coverLetter || ""} onChange={v => updateAppField(selectedApp.id, "coverLetter", v)} rows={8} placeholder="AI-generated or customised cover letter..." /></Field>
+          <Field label="General notes"><RichTextarea value={selectedApp.notes || ""} onChange={v => updateAppField(selectedApp.id, "notes", v)} rows={3} placeholder="Interview notes, contacts, follow-ups..." /></Field>
+          <button onClick={() => deleteApp(selectedApp.id)} style={{ ...btn, color:"#e24b4a", borderColor:"#e24b4a", marginTop:8 }}>Delete application</button>
+        </div>
+      ))}
+
+      {tab === "Networking" && (selectedContact ? (
+        <div>
+          <button onClick={() => setSelectedContactId(null)} style={{ ...btn, marginBottom:16, fontSize:13 }}>Back</button>
+          <div style={{ fontSize:18, fontWeight:500, marginBottom:12 }}>{selectedContact.name}</div>
+          <Field label="Category"><select value={selectedContact.category || ""} onChange={e => updateContactField(selectedContact.id, "category", e.target.value)} style={inp}><option value="">Select...</option>{CONTACT_CATEGORIES.map(c => <option key={c}>{c}</option>)}</select></Field>
+          {[["howMet","How met","e.g. LinkedIn, conference..."],["role","Role","Job title"],["company","Company","Company"],["linkedin","LinkedIn","https://linkedin.com/in/..."],["nextStep","Next step","e.g. Follow up next week"]].map(([f, l, ph]) => (
+            <Field key={f} label={l}><input value={selectedContact[f] || ""} onChange={e => updateContactField(selectedContact.id, f, e.target.value)} style={inp} placeholder={ph} /></Field>
+          ))}
+          <Field label="Date met"><input type="date" value={selectedContact.dateMet || ""} onChange={e => updateContactField(selectedContact.id, "dateMet", e.target.value)} style={inp} /></Field>
+          <Field label="Last contact"><input type="date" value={selectedContact.lastContact || ""} onChange={e => updateContactField(selectedContact.id, "lastContact", e.target.value)} style={inp} /></Field>
+          <Field label="Notes"><RichTextarea value={selectedContact.notes || ""} onChange={v => updateContactField(selectedContact.id, "notes", v)} rows={4} placeholder="Conversation notes..." /></Field>
+          <button onClick={() => deleteContact(selectedContact.id)} style={{ ...btn, color:"#e24b4a", borderColor:"#e24b4a", marginTop:8 }}>Delete contact</button>
+        </div>
+      ) : (
+        <div>
+          <div style={{ marginBottom:12, display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+            <div style={{ fontSize:15, fontWeight:500 }}>Networking contacts</div>
+            <button onClick={() => setShowAddContact(true)} style={btnP}>+ Add contact</button>
+          </div>
+          {state.contacts.length === 0 && <div style={{ fontSize:14, color:"var(--color-text-secondary)", padding:"1rem 0" }}>No contacts yet.</div>}
+          {state.contacts.map(c => {
+            const stale = c.lastContact && daysBetween(c.lastContact, today) > 30;
+            return (
+              <div key={c.id} style={{ ...card, marginBottom:6 }}>
+                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:8 }}>
+                  <div style={{ minWidth:0 }}>
+                    <div style={{ fontSize:14, fontWeight:500 }}>{c.name}{c.role ? " - " + c.role : ""}{c.company ? " @ " + c.company : ""}</div>
+                    {c.category && <span style={{ fontSize:11, background:"#e1f5ee", color:"#0f6e56", borderRadius:4, padding:"2px 6px", display:"inline-block", marginTop:4 }}>{c.category}</span>}
+                    {c.nextStep && <div style={{ fontSize:13, color:"var(--color-text-info)", marginTop:4 }}>Next: {c.nextStep}</div>}
+                    {stale && <div style={{ fontSize:12, color:"#ba7517", marginTop:4 }}>Last contact {daysBetween(c.lastContact, today)} days ago</div>}
+                  </div>
+                  <button onClick={() => setSelectedContactId(c.id)} style={{ ...btn, fontSize:12, padding:"4px 10px" }}>View</button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ))}
+
+      {tab === "Habits" && (
+        <div>
+          <div style={{ marginBottom:12, display:"flex", justifyContent:"space-between", alignItems:"center", gap:8, flexWrap:"wrap" }}>
+            <div style={{ fontSize:15, fontWeight:500 }}>Habit tracker</div>
+            <div style={{ display:"flex", gap:8 }}>
+              <button onClick={() => save(syncHabitTasks(state))} style={{ ...btn, fontSize:12, padding:"4px 10px", color:"#1d9e75", borderColor:"#1d9e75" }}>Sync to Today</button>
+              <button onClick={() => setShowAddHabit(true)} style={btnP}>+ Add habit</button>
+            </div>
+          </div>
+          {state.habits.length === 0 && <div style={{ fontSize:14, color:"var(--color-text-secondary)", padding:"1rem 0" }}>No habits yet.</div>}
+          {state.habits.map(h => {
+            const done = h.completedDates.includes(today); const streak = getStreak(h);
+            const last7 = Array.from({ length:7 }, (_, i) => { const d = new Date(); d.setDate(d.getDate() - (6 - i)); return dateStr(d); });
+            return (
+              <div key={h.id} style={{ ...card, padding:12 }}>
+                <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+                  <button onClick={() => toggleHabit(h.id)} style={{ width:28, height:28, borderRadius:"50%", border:"2px solid " + (done ? "#1d9e75" : "var(--color-border-secondary)"), background:done ? "#1d9e75" : "transparent", color:"#fff", cursor:"pointer", fontSize:14, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>{done ? "✓" : ""}</button>
+                  <div style={{ flex:1, minWidth:0 }}>
+                    <div style={{ fontSize:14, fontWeight:500, textDecoration:done ? "line-through" : "none", color:done ? "var(--color-text-tertiary)" : "var(--color-text-primary)" }}>{h.title}</div>
+                    <div style={{ display:"flex", gap:3, marginTop:4, alignItems:"center" }}>
+                      <span style={{ fontSize:12, color:"var(--color-text-secondary)", marginRight:6 }}>{h.freq}</span>
+                      {last7.map(d => <span key={d} title={d} style={{ width:10, height:10, borderRadius:2, background:h.completedDates.includes(d) ? "#1d9e75" : "var(--color-border-tertiary)" }} />)}
+                    </div>
+                  </div>
+                  {streak > 0 && <div style={{ fontSize:13, color:"#ba7517", fontWeight:500, flexShrink:0 }}>🔥 {streak}</div>}
+                  <button onClick={() => setEditingHabit({ ...h })} style={{ ...btn, padding:"4px 8px", fontSize:12, flexShrink:0 }}>Edit</button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {tab === "Weekly" && (
+        <div>
+          <div style={{ marginBottom:16 }}>
+            <div style={{ fontSize:15, fontWeight:500, marginBottom:8 }}>Weekly focus goal</div>
+            <div style={{ display:"flex", gap:8 }}>
+              <input value={weeklyGoalInput} onChange={e => setWeeklyGoalInput(e.target.value)} placeholder="What is your main goal this week?" style={{ ...inp, flex:1 }} />
+              <button onClick={() => save({ ...state, weeklyGoal:weeklyGoalInput })} style={btnP}>Save</button>
+            </div>
+            {state.weeklyGoal && <div style={{ fontSize:13, color:"var(--color-text-secondary)", marginTop:6 }}>Current: {state.weeklyGoal}</div>}
+          </div>
+          <div style={{ marginBottom:16 }}>
+            <div style={{ fontSize:15, fontWeight:500, marginBottom:8 }}>Weekly job search target</div>
+            <div style={{ display:"flex", alignItems:"center", gap:10, flexWrap:"wrap" }}>
+              <span style={{ fontSize:13, color:"var(--color-text-secondary)" }}>Target apps/week:</span>
+              <input type="number" min={1} max={50} value={state.weeklyTargetApps} onChange={e => save({ ...state, weeklyTargetApps:Math.max(1, +e.target.value || 1) })} style={{ ...inp, width:70 }} />
+              <span style={{ fontSize:13 }}>{appsThisWeek} in the last 7 days</span>
+            </div>
+          </div>
+          <div style={{ marginBottom:16 }}>
+            <div style={{ fontSize:15, fontWeight:500, marginBottom:8 }}>Log a win</div>
+            <div style={{ display:"flex", gap:8 }}>
+              <input value={win} onChange={e => setWin(e.target.value)} onKeyDown={e => e.key === "Enter" && addWin()} placeholder="Something you are proud of..." style={{ ...inp, flex:1 }} />
+              <button onClick={addWin} style={btnP}>Add win</button>
+            </div>
+            {state.wins.filter(w => !w.archived).map(w => (
+              <div key={w.id} style={{ fontSize:13, padding:"8px 10px", background:"var(--color-background-secondary)", borderRadius:8, marginTop:6, display:"flex", alignItems:"flex-start", gap:8 }}>
+                <span style={{ color:"#639922" }}>★</span>
+                <span style={{ flex:1 }}>{w.text}<span style={{ color:"var(--color-text-tertiary)", marginLeft:6 }}>{w.date}</span></span>
+                <button onClick={() => setEditingWin({ ...w })} style={{ ...btn, padding:"2px 8px", fontSize:11 }}>Edit</button>
+                <button onClick={() => toggleWinArchive(w.id)} style={{ ...btn, padding:"2px 8px", fontSize:11, color:"#ba7517", borderColor:"#ba7517" }}>Archive</button>
+              </div>
+            ))}
+            {state.wins.some(w => w.archived) && (
+              <details style={{ marginTop:12 }}>
+                <summary style={{ fontSize:12, color:"var(--color-text-secondary)", cursor:"pointer", marginBottom:6 }}>Archived wins ({state.wins.filter(w => w.archived).length})</summary>
+                {state.wins.filter(w => w.archived).map(w => (
+                  <div key={w.id} style={{ fontSize:13, padding:"8px 10px", background:"var(--color-background-secondary)", borderRadius:8, marginTop:6, opacity:0.6, display:"flex", alignItems:"flex-start", gap:8 }}>
+                    <span style={{ flex:1 }}>{w.text}<span style={{ color:"var(--color-text-tertiary)", marginLeft:6 }}>{w.date}</span></span>
+                    <button onClick={() => toggleWinArchive(w.id)} style={{ ...btn, padding:"2px 8px", fontSize:11, color:"#1d9e75", borderColor:"#1d9e75" }}>Restore</button>
+                    <button onClick={() => deleteWin(w.id)} style={{ ...btn, padding:"2px 8px", fontSize:11, color:"#e24b4a", borderColor:"#e24b4a" }}>x</button>
+                  </div>
+                ))}
+              </details>
+            )}
+          </div>
+          <div>
+            <div style={{ fontSize:15, fontWeight:500, marginBottom:8 }}>Weekly reflection</div>
+            <textarea value={reflection} onChange={e => setReflection(e.target.value)} placeholder="What worked well? What would you do differently?" rows={4} style={{ ...inp, resize:"vertical" }} />
+            <button onClick={saveReflection} style={{ ...btnP, marginTop:8 }}>Save reflection</button>
+            {state.reflections.length > 0 && (
+              <details open style={{ marginTop:8 }}>
+                <summary style={{ fontSize:12, color:"var(--color-text-secondary)", cursor:"pointer" }}>Past reflections ({state.reflections.length})</summary>
+                {state.reflections.map(r => (
+                  <div key={r.id} style={{ fontSize:13, padding:"8px 10px", background:"var(--color-background-secondary)", borderRadius:8, marginTop:6, whiteSpace:"pre-wrap" }}>
+                    <div style={{ color:"var(--color-text-tertiary)", fontSize:11, marginBottom:4 }}>{r.date}</div>{r.text}
+                  </div>
+                ))}
+              </details>
+            )}
+          </div>
+        </div>
+      )}
+
+      {tab === "Achievements" && (
+        <div>
+          <div style={{ marginBottom:12, display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+            <div style={{ fontSize:15, fontWeight:500 }}>STAR / CAR achievements</div>
+            <button onClick={() => setShowAddAchievement(true)} style={btnP}>+ Add achievement</button>
+          </div>
+          <div style={{ fontSize:13, color:"var(--color-text-secondary)", marginBottom:16 }}>Build your achievement library for interviews, CV and LinkedIn.</div>
+          {(state.achievements || []).length === 0 && <div style={{ fontSize:14, color:"var(--color-text-secondary)", padding:"1rem 0" }}>No achievements yet.</div>}
+          {(state.achievements || []).map(a => (
+            <div key={a.id} style={{ ...card, borderLeft:"3px solid #d85a30", padding:12, marginBottom:10 }}>
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:8 }}>
+                <div style={{ flex:1, minWidth:0 }}>
+                  <div style={{ fontSize:14, fontWeight:500, marginBottom:6 }}>{a.title}</div>
+                  {a.category && <span style={{ fontSize:11, background:"#faece7", color:"#993c1d", borderRadius:4, padding:"2px 8px", display:"inline-block" }}>{a.category}</span>}
+                  {a.tags && <span style={{ fontSize:11, color:"var(--color-text-tertiary)", marginLeft:8 }}>{a.tags}</span>}
+                  <div style={{ marginTop:8, display:"flex", flexDirection:"column", gap:6 }}>
+                    {[["C - Context",a.context],["S - Situation",a.situation],["T - Task",a.task],["A - Action",a.action],["R - Result",a.result]].map(([label, val]) => stripHtml(val) ? (
+                      <div key={label}>
+                        <div style={{ fontSize:11, fontWeight:500, color:"#d85a30", marginBottom:2 }}>{label}</div>
+                        <Html html={val} style={{ fontSize:13, lineHeight:1.6 }} />
+                      </div>
+                    ) : null)}
+                    {stripHtml(a.coachingFeedback) && (
+                      <div style={{ marginTop:4, background:"#e6f1fb", border:"0.5px solid #b5d4f4", borderRadius:8, padding:"8px 10px" }}>
+                        <div style={{ fontSize:11, fontWeight:500, color:"#185fa5", marginBottom:2 }}>Coaching feedback</div>
+                        <Html html={a.coachingFeedback} style={{ fontSize:13, color:"#0c447c", lineHeight:1.6 }} />
+                      </div>
+                    )}
+                  </div>
+                </div>
+                <div style={{ display:"flex", flexDirection:"column", gap:6, flexShrink:0 }}>
+                  <button onClick={() => setEditingAchievement({ ...a })} style={{ ...btn, padding:"4px 10px", fontSize:12 }}>Edit</button>
+                  <button onClick={() => deleteAchievement(a.id)} style={{ ...btn, padding:"4px 10px", fontSize:12, color:"#e24b4a", borderColor:"#e24b4a" }}>x</button>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {tab === "Missions" && <MissionsTab state={state} save={save} />}
+      {tab === "Strengths" && <StrengthsTab state={state} save={save} />}
+
+      {tab === "Resources" && (
+        <div>
+          <div style={{ marginBottom:12, display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+            <div style={{ fontSize:15, fontWeight:500 }}>Key links and resources</div>
+            <button onClick={() => { setNewResource(emptyResource); setShowAddResource(true); }} style={btnP}>+ Add resource</button>
+          </div>
+          <div style={{ fontSize:13, color:"var(--color-text-secondary)", marginBottom:12 }}>Track useful links - job boards, tools, articles, courses and more.</div>
+          {resourceCategories.length > 1 && (
+            <div style={{ display:"flex", gap:6, flexWrap:"wrap", marginBottom:16 }}>
+              {resourceCategories.map(c => <button key={c} onClick={() => setResourceFilter(c)} style={{ ...btn, fontSize:12, padding:"3px 10px", background:resourceFilter === c ? "#1d9e75" : "transparent", color:resourceFilter === c ? "#fff" : "var(--color-text-secondary)", border:"0.5px solid " + (resourceFilter === c ? "#1d9e75" : "var(--color-border-tertiary)") }}>{c}</button>)}
+            </div>
+          )}
+          {(state.resources || []).length === 0 && <div style={{ fontSize:14, color:"var(--color-text-secondary)", padding:"1rem 0" }}>No resources yet. Add your first link!</div>}
+          {(state.resources || []).filter(r => resourceFilter === "All" || r.category === resourceFilter).map(r => (
+            <div key={r.id} style={{ ...card, borderLeft:"3px solid #1d9e75", padding:12 }}>
+              <div style={{ display:"flex", alignItems:"flex-start", gap:8 }}>
+                <div style={{ flex:1, minWidth:0 }}>
+                  <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" }}>
+                    {/^https?:\/\//.test(r.url) ? <a href={r.url} target="_blank" rel="noopener noreferrer" style={{ fontSize:14, fontWeight:500, color:"#185fa5", textDecoration:"none" }}>{r.title}</a> : <span style={{ fontSize:14, fontWeight:500 }}>{r.title}</span>}
+                    {r.category && <span style={{ fontSize:11, background:"#e1f5ee", color:"#085041", borderRadius:4, padding:"2px 6px" }}>{r.category}</span>}
+                  </div>
+                  {r.description && <div style={{ fontSize:13, color:"var(--color-text-secondary)", marginTop:4 }}>{r.description}</div>}
+                  {r.url && <div style={{ fontSize:11, color:"var(--color-text-tertiary)", marginTop:4, wordBreak:"break-all" }}>{r.url}</div>}
+                  {r.tags && <div style={{ fontSize:11, color:"var(--color-text-tertiary)", marginTop:4 }}>{r.tags}</div>}
+                </div>
+                <div style={{ display:"flex", gap:6, flexShrink:0 }}>
+                  <button onClick={() => setEditingResource({ ...r })} style={{ ...btn, padding:"4px 8px", fontSize:12 }}>Edit</button>
+                  <button onClick={() => deleteResource(r.id)} style={{ ...btn, padding:"4px 8px", fontSize:12, color:"#e24b4a", borderColor:"#e24b4a" }}>x</button>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {tab === "AI Coach" && <AICoachTab state={state} askAI={askAI} />}
+      {tab === "AI: About Me" && <AboutMeView state={state} />}
+      {tab === "AI: Interview" && <InterviewPracticeChat state={state} />}
+      {tab === "AI: LinkedIn" && <LinkedInReviewChat savedSections={state.linkedInSections || {}} />}
+      {tab === "AI: Salary" && <AICoachTab key="salary" state={state} askAI={askAI} initialView="salary" />}
+
+      {/* ---------------- Modals ---------------- */}
+      <Modal show={showAdd} onClose={() => setShowAdd(false)} title="Add task">
+        <Field label="Title"><input value={newTask.title} onChange={e => setNewTask(t => ({ ...t, title:e.target.value }))} style={inp} placeholder="Task title" /></Field>
+        <Field label="Description"><input value={newTask.desc} onChange={e => setNewTask(t => ({ ...t, desc:e.target.value }))} style={inp} placeholder="Optional description" /></Field>
+        <Field label="Category"><select value={newTask.category} onChange={e => setNewTask(t => ({ ...t, category:e.target.value }))} style={inp}>{CATEGORIES.map(c => <option key={c}>{c}</option>)}</select></Field>
+        <Field label="Priority"><select value={newTask.priority} onChange={e => setNewTask(t => ({ ...t, priority:e.target.value }))} style={inp}>{PRIORITIES.map(p => <option key={p}>{p}</option>)}</select></Field>
+        <Field label="Duration (minutes)"><input type="number" value={newTask.duration} onChange={e => setNewTask(t => ({ ...t, duration:+e.target.value }))} style={inp} min={5} /></Field>
+        <Field label="Due date"><input type="date" value={newTask.due} onChange={e => setNewTask(t => ({ ...t, due:e.target.value }))} style={inp} /></Field>
+        <Field label="Depends on (finish these first)">
+          <select multiple value={newTask.deps} onChange={e => setNewTask(t => ({ ...t, deps:[...e.target.selectedOptions].map(o => o.value) }))} style={{ ...inp, minHeight:70 }}>
+            {state.tasks.filter(t => !t.done && !t.habitId && !t.archived).map(t => <option key={t.id} value={t.id}>{t.title}</option>)}
+          </select>
+        </Field>
+        <div style={{ display:"flex", gap:8, marginTop:16 }}>
+          <button onClick={addTask} style={{ ...btnP, flex:1 }}>Add task</button>
+          <button onClick={() => setShowAdd(false)} style={{ ...btn, flex:1 }}>Cancel</button>
+        </div>
+      </Modal>
+
+      <Modal show={!!editingTask} onClose={() => setEditingTask(null)} title="Edit task">
+        {editingTask && <>
+          <Field label="Title"><input value={editingTask.title} onChange={e => setEditingTask(t => ({ ...t, title:e.target.value }))} style={inp} /></Field>
+          <Field label="Description"><input value={editingTask.desc || ""} onChange={e => setEditingTask(t => ({ ...t, desc:e.target.value }))} style={inp} /></Field>
+          <Field label="Category"><select value={editingTask.category} onChange={e => setEditingTask(t => ({ ...t, category:e.target.value }))} style={inp}>{CATEGORIES.map(c => <option key={c}>{c}</option>)}</select></Field>
+          <Field label="Priority"><select value={editingTask.priority} onChange={e => setEditingTask(t => ({ ...t, priority:e.target.value }))} style={inp}>{PRIORITIES.map(p => <option key={p}>{p}</option>)}</select></Field>
+          <Field label="Duration (minutes)"><input type="number" value={editingTask.duration} onChange={e => setEditingTask(t => ({ ...t, duration:+e.target.value }))} style={inp} min={5} /></Field>
+          <Field label="Due date"><input type="date" value={editingTask.due || ""} onChange={e => setEditingTask(t => ({ ...t, due:e.target.value }))} style={inp} /></Field>
+          <div style={{ display:"flex", gap:8, marginTop:16 }}>
+            <button onClick={saveTaskEdit} style={{ ...btnP, flex:1 }}>Save</button>
+            <button onClick={() => setEditingTask(null)} style={{ ...btn, flex:1 }}>Cancel</button>
+          </div>
+        </>}
+      </Modal>
+
+      <Modal show={showAddHabit} onClose={() => setShowAddHabit(false)} title="Add habit" maxW={400}>
+        <Field label="Habit name"><input value={newHabit.title} onChange={e => setNewHabit(h => ({ ...h, title:e.target.value }))} style={inp} placeholder="e.g. LinkedIn post, 1 lesson on Coursera" /></Field>
+        <Field label="Frequency"><select value={newHabit.freq} onChange={e => setNewHabit(h => ({ ...h, freq:e.target.value }))} style={inp}><option value="daily">Daily</option><option value="weekdays">Weekdays</option><option value="weekly">Weekly (Mondays)</option></select></Field>
+        <div style={{ display:"flex", gap:8, marginTop:16 }}>
+          <button onClick={addHabit} style={{ ...btnP, flex:1 }}>Add habit</button>
+          <button onClick={() => setShowAddHabit(false)} style={{ ...btn, flex:1 }}>Cancel</button>
+        </div>
+      </Modal>
+
+      <Modal show={!!editingHabit} onClose={() => setEditingHabit(null)} title="Edit habit" maxW={400}>
+        {editingHabit && <>
+          <Field label="Title"><input value={editingHabit.title} onChange={e => setEditingHabit(h => ({ ...h, title:e.target.value }))} style={inp} /></Field>
+          <Field label="Frequency"><select value={editingHabit.freq} onChange={e => setEditingHabit(h => ({ ...h, freq:e.target.value }))} style={inp}><option value="daily">Daily</option><option value="weekdays">Weekdays</option><option value="weekly">Weekly (Mondays)</option></select></Field>
+          <div style={{ display:"flex", gap:8, marginTop:16 }}>
+            <button onClick={saveHabitEdit} style={{ ...btnP, flex:1 }}>Save</button>
+            <button onClick={() => setEditingHabit(null)} style={{ ...btn, flex:1 }}>Cancel</button>
+          </div>
+          <div style={{ borderTop:"0.5px solid var(--color-border-tertiary)", marginTop:16, paddingTop:12 }}>
+            <button onClick={() => deleteHabit(editingHabit.id)} style={{ ...btn, color:"#e24b4a", borderColor:"#e24b4a", width:"100%", fontSize:13 }}>Delete habit</button>
+          </div>
+        </>}
+      </Modal>
+
+      <Modal show={showAddApp} onClose={() => setShowAddApp(false)} title="Add application" maxW={440}>
+        <Field label="Company"><input value={newApp.company} onChange={e => setNewApp(a => ({ ...a, company:e.target.value }))} style={inp} placeholder="Company name" /></Field>
+        <Field label="Role"><input value={newApp.role} onChange={e => setNewApp(a => ({ ...a, role:e.target.value }))} style={inp} placeholder="Job title" /></Field>
+        <Field label="Stage"><select value={newApp.stage} onChange={e => setNewApp(a => ({ ...a, stage:e.target.value }))} style={inp}>{PIPELINE_STAGES.map(s => <option key={s}>{s}</option>)}</select></Field>
+        <Field label="JD link"><input value={newApp.jdLink} onChange={e => setNewApp(a => ({ ...a, jdLink:e.target.value }))} style={inp} placeholder="https://..." /></Field>
+        <Field label="Date applied"><input type="date" value={newApp.date} onChange={e => setNewApp(a => ({ ...a, date:e.target.value }))} style={inp} /></Field>
+        <Field label="Notes"><input value={newApp.notes} onChange={e => setNewApp(a => ({ ...a, notes:e.target.value }))} style={inp} placeholder="Quick notes..." /></Field>
+        <div style={{ display:"flex", gap:8, marginTop:16 }}>
+          <button onClick={addApp} style={{ ...btnP, flex:1 }}>Add</button>
+          <button onClick={() => setShowAddApp(false)} style={{ ...btn, flex:1 }}>Cancel</button>
+        </div>
+      </Modal>
+
+      <Modal show={showAddContact} onClose={() => setShowAddContact(false)} title="Add contact" maxW={440}>
+        <Field label="Name"><input value={newContact.name} onChange={e => setNewContact(c => ({ ...c, name:e.target.value }))} style={inp} placeholder="Full name" /></Field>
+        <Field label="Category"><select value={newContact.category} onChange={e => setNewContact(c => ({ ...c, category:e.target.value }))} style={inp}><option value="">Select...</option>{CONTACT_CATEGORIES.map(c => <option key={c}>{c}</option>)}</select></Field>
+        {[["role","Role","Job title"],["company","Company","Company"],["linkedin","LinkedIn","https://linkedin.com/in/..."],["howMet","How met","e.g. LinkedIn, conference..."],["nextStep","Next step","e.g. Follow up next week"],["notes","Notes","Notes"]].map(([f, l, ph]) => (
+          <Field key={f} label={l}><input value={newContact[f]} onChange={e => setNewContact(c => ({ ...c, [f]:e.target.value }))} style={inp} placeholder={ph} /></Field>
+        ))}
+        <Field label="Date met"><input type="date" value={newContact.dateMet} onChange={e => setNewContact(c => ({ ...c, dateMet:e.target.value, lastContact:c.lastContact || e.target.value }))} style={inp} /></Field>
+        <div style={{ display:"flex", gap:8, marginTop:16 }}>
+          <button onClick={addContact} style={{ ...btnP, flex:1 }}>Add</button>
+          <button onClick={() => setShowAddContact(false)} style={{ ...btn, flex:1 }}>Cancel</button>
+        </div>
+      </Modal>
+
+      {[["add", showAddAchievement, () => setShowAddAchievement(false), newAchievement, setNewAchievement, addAchievement, "Add STAR / CAR achievement", "Add achievement"],
+        ["edit", !!editingAchievement, () => setEditingAchievement(null), editingAchievement, setEditingAchievement, saveAchievementEdit, "Edit achievement", "Save"]].map(([k, show, close, a, setA, onSave, title, cta]) => (
+        <Modal key={k} show={show} onClose={close} title={title} maxW={560}>
+          {a && <>
+            <Field label="Achievement title"><input value={a.title} onChange={e => setA(x => ({ ...x, title:e.target.value }))} style={inp} placeholder="e.g. Led digital transformation project" /></Field>
+            <Field label="Category"><input value={a.category || ""} onChange={e => setA(x => ({ ...x, category:e.target.value }))} style={inp} placeholder="e.g. Leadership, Technical, Delivery..." /></Field>
+            <Field label="Tags (comma separated)"><input value={a.tags || ""} onChange={e => setA(x => ({ ...x, tags:e.target.value }))} style={inp} placeholder="e.g. stakeholder management, agile..." /></Field>
+            <Field label="C - Context"><RichTextarea value={a.context || ""} onChange={v => setA(x => ({ ...x, context:v }))} rows={2} placeholder="What was the broader context? Company, team, timeframe..." /></Field>
+            <Field label="S - Situation"><RichTextarea value={a.situation || ""} onChange={v => setA(x => ({ ...x, situation:v }))} rows={2} placeholder="What was the specific situation or challenge?" /></Field>
+            <Field label="T - Task"><RichTextarea value={a.task || ""} onChange={v => setA(x => ({ ...x, task:v }))} rows={2} placeholder="What was your specific responsibility?" /></Field>
+            <Field label="A - Action (use I not we)"><RichTextarea value={a.action || ""} onChange={v => setA(x => ({ ...x, action:v }))} rows={3} placeholder="What specific actions did you take?" /></Field>
+            <Field label="R - Result (include numbers/timeframes)"><RichTextarea value={a.result || ""} onChange={v => setA(x => ({ ...x, result:v }))} rows={2} placeholder="What was the measurable result?" /></Field>
+            <Field label="Coaching feedback"><RichTextarea value={a.coachingFeedback || ""} onChange={v => setA(x => ({ ...x, coachingFeedback:v }))} rows={3} placeholder="Notes from interview practice, mentor feedback..." /></Field>
+            <div style={{ display:"flex", gap:8, marginTop:16 }}>
+              <button onClick={onSave} style={{ ...btnP, flex:1 }}>{cta}</button>
+              <button onClick={close} style={{ ...btn, flex:1 }}>Cancel</button>
+            </div>
+          </>}
+        </Modal>
+      ))}
+
+      <Modal show={showAddResource} onClose={() => setShowAddResource(false)} title="Add resource" maxW={560}>
+        <AddResourceModal newResource={newResource} setNewResource={setNewResource} onAdd={addResource} onClose={() => setShowAddResource(false)} />
+      </Modal>
+
+      <Modal show={!!editingResource} onClose={() => setEditingResource(null)} title="Edit resource">
+        {editingResource && <>
+          {[["title","Title"],["url","URL"],["category","Category"],["description","Description"],["tags","Tags"]].map(([f, l]) => (
+            <Field key={f} label={l}><input value={editingResource[f] || ""} onChange={e => setEditingResource(r => ({ ...r, [f]:e.target.value }))} style={inp} /></Field>
+          ))}
+          <div style={{ display:"flex", gap:8, marginTop:16 }}>
+            <button onClick={saveResourceEdit} style={{ ...btnP, flex:1 }}>Save</button>
+            <button onClick={() => setEditingResource(null)} style={{ ...btn, flex:1 }}>Cancel</button>
+          </div>
+        </>}
+      </Modal>
+
+      <Modal show={showArchive} onClose={() => setShowArchive(false)} title="Completed task archive" maxW={560}>
+        <div style={{ fontSize:13, color:"var(--color-text-secondary)", marginBottom:12 }}>All previously completed and archived tasks.</div>
+        {state.tasks.filter(t => t.archived).length === 0 && <div style={{ fontSize:14, color:"var(--color-text-secondary)", padding:"1rem 0" }}>No archived tasks yet.</div>}
+        {state.tasks.filter(t => t.archived).reverse().map(t => (
+          <div key={t.id} style={{ background:"var(--color-background-secondary)", borderLeft:"3px solid " + (priorityColor[t.priority] || "#888"), borderRadius:8, padding:"10px 12px", marginBottom:8 }}>
+            <div style={{ display:"flex", alignItems:"flex-start", gap:8 }}>
+              <div style={{ flex:1 }}>
+                <div style={{ fontSize:14, fontWeight:500, textDecoration:"line-through", color:"var(--color-text-tertiary)" }}>{t.title}</div>
+                <div style={{ display:"flex", gap:6, marginTop:4, flexWrap:"wrap", fontSize:11, color:"var(--color-text-tertiary)" }}>
+                  <span>{t.category}</span>{t.due && <span>Due: {t.due}</span>}{t.habitId && <span style={{ color:"#1d9e75" }}>Habit</span>}
+                </div>
+              </div>
+              <button onClick={() => restoreTask(t.id)} style={{ ...btn, fontSize:11, padding:"3px 8px", color:"#1d9e75", borderColor:"#1d9e75" }}>Restore</button>
+              <button onClick={() => deleteTask(t.id)} style={{ ...btn, fontSize:11, padding:"3px 8px", color:"#e24b4a", borderColor:"#e24b4a" }}>x</button>
+            </div>
+          </div>
+        ))}
+        {state.tasks.some(t => t.archived) && (
+          <button onClick={() => confirm("Permanently delete all archived tasks?") && save({ ...state, tasks:state.tasks.filter(t => !t.archived) })} style={{ ...btn, color:"#e24b4a", borderColor:"#e24b4a", width:"100%", marginTop:8, fontSize:13 }}>Clear all archived</button>
+        )}
+      </Modal>
+
+      <Modal show={!!editingWin} onClose={() => setEditingWin(null)} title="Edit win" maxW={440}>
+        {editingWin && <>
+          <Field label="Win"><textarea value={editingWin.text} onChange={e => setEditingWin(w => ({ ...w, text:e.target.value }))} rows={3} style={{ ...inp, resize:"vertical" }} /></Field>
+          <Field label="Date"><input type="date" value={editingWin.date} onChange={e => setEditingWin(w => ({ ...w, date:e.target.value }))} style={inp} /></Field>
+          <div style={{ display:"flex", gap:8, marginTop:16 }}>
+            <button onClick={saveWinEdit} style={{ ...btnP, flex:1 }}>Save</button>
+            <button onClick={() => setEditingWin(null)} style={{ ...btn, flex:1 }}>Cancel</button>
+          </div>
+        </>}
+      </Modal>
+
+      <Modal show={showImportExport} onClose={() => { setShowImportExport(false); setImportText(""); setImportMsg(""); }} title="Import / Export data" maxW={560}>
+        <div style={{ fontSize:13, color:"var(--color-text-secondary)", marginBottom:16, lineHeight:1.6 }}>Your data lives only in this browser's local storage. Clearing site data, private browsing, or switching device or browser means it is not there. Export regularly as a backup. Your API key is never included.</div>
+        <div style={{ marginBottom:20 }}>
+          <div style={{ fontSize:14, fontWeight:500, marginBottom:8 }}>Export</div>
+          <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+            <button onClick={downloadExport} style={{ ...btnP, flex:1 }}>Download backup (.json)</button>
+            <button onClick={() => navigator.clipboard.writeText(exportJson()).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); })} style={{ ...btn, flex:1 }}>{copied ? "Copied!" : "Copy to clipboard"}</button>
+          </div>
+        </div>
+        <div style={{ borderTop:"0.5px solid var(--color-border-tertiary)", paddingTop:16 }}>
+          <div style={{ fontSize:14, fontWeight:500, marginBottom:6 }}>Import</div>
+          <div style={{ fontSize:12, color:"#ba7517", background:"#faeeda", borderRadius:8, padding:"8px 10px", marginBottom:10 }}>Importing replaces all current data. Download a backup first.</div>
+          <input type="file" accept="application/json,.json" onChange={importFile} style={{ fontSize:13, marginBottom:10 }} />
+          <textarea value={importText} onChange={e => { setImportText(e.target.value); setImportMsg(""); }} rows={5} style={{ ...inp, resize:"vertical", fontFamily:"var(--font-mono)", fontSize:12, marginBottom:8 }} placeholder="...or paste exported JSON here (also works with exports from the original Claude artifact)" />
+          {importMsg && <div style={{ fontSize:12, color:"#e24b4a", marginBottom:8 }}>{importMsg}</div>}
+          <button onClick={() => applyImport(importText)} disabled={!importText.trim()} style={{ ...btn, width:"100%", color:"#e24b4a", borderColor:"#e24b4a" }}>Import pasted data and replace</button>
+        </div>
+      </Modal>
+
+      <Modal show={showCvModal} onClose={() => setShowCvModal(false)} title="My CV and LinkedIn Profile" maxW={640}>
+        <CvLinkedInModal state={state} save={save} onClose={() => setShowCvModal(false)} />
+      </Modal>
+
+      <Modal show={showSettings} onClose={() => setShowSettings(false)} title="Settings: AI features">
+        <SettingsModal onClose={() => setShowSettings(false)} />
+      </Modal>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+<noscript><p style="padding:16px">This tracker needs JavaScript enabled.</p></noscript>
+</body>
+</html>
