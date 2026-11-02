@@ -32,7 +32,7 @@ A static page (`index.html`). There is no build step and no server. Data is save
 | 6 Thrive | AI: Salary (salary band estimate) | **Yes** |
 | 6 Thrive | AI Coach (all buttons) | **Yes** |
 
-Summary: 9 AI features out of 26 listed. The other 17 are plain data entry and logic that need no AI and no API key.
+Summary: 9 AI features out of 25 listed. The other 16 are plain data entry and logic that need no AI and no API key.
 
 ## How AI works on GitHub Pages
 
